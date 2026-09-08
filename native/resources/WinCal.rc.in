@@ -1,0 +1,5 @@
+#include <windows.h>
+#include "@CMAKE_CURRENT_SOURCE_DIR@/resources/resource.h"
+
+IDI_APP_ICON ICON "@WINCAL_ICON_PATH@"
+1 RT_MANIFEST "@WINCAL_MANIFEST_PATH@"

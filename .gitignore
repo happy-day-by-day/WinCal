@@ -14,6 +14,8 @@ dist/
 
 ## Build outputs
 build_output.txt
+native/build/
+native/out/
 
 ## Test data
 *.ics
