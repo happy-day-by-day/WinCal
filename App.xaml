@@ -1,0 +1,45 @@
+<Application x:Class="WinCal.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sys="clr-namespace:System;assembly=System.Runtime"
+             xmlns:tb="http://www.hardcodet.net/taskbar"
+             ShutdownMode="OnExplicitShutdown">
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Views/Themes/Light.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- 日历默认排版值；弹窗会按用户选择的字号档位提供局部覆盖。 -->
+            <sys:Double x:Key="CalendarMonthTitleFontSize">19</sys:Double>
+            <sys:Double x:Key="CalendarNavigationFontSize">18</sys:Double>
+            <sys:Double x:Key="CalendarButtonFontSize">11</sys:Double>
+            <sys:Double x:Key="CalendarWeekFontSize">10</sys:Double>
+            <sys:Double x:Key="CalendarDayFontSize">13</sys:Double>
+            <sys:Double x:Key="CalendarSmallFontSize">8</sys:Double>
+            <sys:Double x:Key="CalendarSectionTitleFontSize">12</sys:Double>
+            <sys:Double x:Key="CalendarSectionHintFontSize">9</sys:Double>
+            <sys:Double x:Key="CalendarEndMarkerFontSize">8.5</sys:Double>
+            <sys:Double x:Key="CalendarEventTitleFontSize">11.5</sys:Double>
+            <sys:Double x:Key="CalendarEventMetaFontSize">9.5</sys:Double>
+
+            <sys:Double x:Key="CalendarMonthHeaderHeight">52</sys:Double>
+            <sys:Double x:Key="CalendarWeekHeaderHeight">23</sys:Double>
+            <sys:Double x:Key="CalendarDayCellHeight">44</sys:Double>
+            <sys:Double x:Key="CalendarDayCircleSize">28</sys:Double>
+            <sys:Double x:Key="CalendarBadgeSize">12</sys:Double>
+            <sys:Double x:Key="CalendarNavigationButtonSize">30</sys:Double>
+            <sys:Double x:Key="CalendarEventItemHeight">42</sys:Double>
+            <GridLength x:Key="CalendarEventListHeight">180</GridLength>
+            <sys:Double x:Key="CalendarHeaderActionSize">28</sys:Double>
+            <sys:Double x:Key="CalendarSectionAccentHeight">26</sys:Double>
+
+            <!-- 托盘图标定义（右键菜单在代码中动态创建） -->
+            <tb:TaskbarIcon x:Key="TrayIcon"
+                            ToolTipText="miniCal"
+                            Visibility="Visible" />
+        </ResourceDictionary>
+    </Application.Resources>
+
+</Application>

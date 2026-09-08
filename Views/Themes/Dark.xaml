@@ -1,0 +1,71 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 背景色 -->
+    <Color x:Key="BackgroundColor">#FF171A23</Color>
+    <Color x:Key="CardBackgroundColor">#FF20242F</Color>
+    <Color x:Key="SectionBackgroundColor">#FF1B1F29</Color>
+    <Color x:Key="ControlBackgroundColor">#FF2B303D</Color>
+    <Color x:Key="EventCardColor">#FF242936</Color>
+    <Color x:Key="WeekendTextColor">#FFFF999D</Color>
+    <Color x:Key="HeaderStartColor">#FF292B4B</Color>
+    <Color x:Key="HeaderEndColor">#FF30273F</Color>
+
+    <!-- 强调色 -->
+    <Color x:Key="TodayAccentColor">#FF8B91FF</Color>
+
+    <!-- 文本色 -->
+    <Color x:Key="TextPrimaryColor">#FFF2F4FA</Color>
+    <Color x:Key="TextSecondaryColor">#FFA8AFC0</Color>
+    <Color x:Key="TextDisabledColor">#FF626A7A</Color>
+    <Color x:Key="TextOnAccentColor">#FFFFFFFF</Color>
+
+    <!-- 分隔与边框 -->
+    <Color x:Key="SeparatorColor">#FF303543</Color>
+    <Color x:Key="BorderColor">#FF343A49</Color>
+
+    <!-- 交互状态 -->
+    <Color x:Key="HoverColor">#FF30354B</Color>
+    <Color x:Key="PressedColor">#FF3B4058</Color>
+    <Color x:Key="SelectedColor">#FF343858</Color>
+
+    <!-- 阴影 -->
+    <Color x:Key="ShadowColor">#66000000</Color>
+
+    <!-- 事件圆点 -->
+    <Color x:Key="EventDotColor">#FF4CC2FF</Color>
+
+    <!-- 节假日 / 补班角标 -->
+    <Color x:Key="RestDayBadgeBackgroundColor">#FF294735</Color>
+    <Color x:Key="RestDayBadgeForegroundColor">#FFA9D6B3</Color>
+    <Color x:Key="WorkdayBadgeBackgroundColor">#FF55491F</Color>
+    <Color x:Key="WorkdayBadgeForegroundColor">#FFF2D46B</Color>
+
+    <!-- 画刷（从颜色派生） -->
+    <SolidColorBrush x:Key="BackgroundBrush" Color="{StaticResource BackgroundColor}" />
+    <SolidColorBrush x:Key="CardBackgroundBrush" Color="{StaticResource CardBackgroundColor}" />
+    <SolidColorBrush x:Key="SectionBackgroundBrush" Color="{StaticResource SectionBackgroundColor}" />
+    <SolidColorBrush x:Key="ControlBackgroundBrush" Color="{StaticResource ControlBackgroundColor}" />
+    <SolidColorBrush x:Key="EventCardBrush" Color="{StaticResource EventCardColor}" />
+    <SolidColorBrush x:Key="WeekendTextBrush" Color="{StaticResource WeekendTextColor}" />
+    <LinearGradientBrush x:Key="HeaderBackgroundBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="{StaticResource HeaderStartColor}" Offset="0" />
+        <GradientStop Color="{StaticResource HeaderEndColor}" Offset="1" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="TodayAccentBrush" Color="{StaticResource TodayAccentColor}" />
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="{StaticResource TextPrimaryColor}" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource TextSecondaryColor}" />
+    <SolidColorBrush x:Key="TextDisabledBrush" Color="{StaticResource TextDisabledColor}" />
+    <SolidColorBrush x:Key="TextOnAccentBrush" Color="{StaticResource TextOnAccentColor}" />
+    <SolidColorBrush x:Key="SeparatorBrush" Color="{StaticResource SeparatorColor}" />
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="HoverBrush" Color="{StaticResource HoverColor}" />
+    <SolidColorBrush x:Key="PressedBrush" Color="{StaticResource PressedColor}" />
+    <SolidColorBrush x:Key="SelectedBrush" Color="{StaticResource SelectedColor}" />
+    <SolidColorBrush x:Key="EventDotBrush" Color="{StaticResource EventDotColor}" />
+    <SolidColorBrush x:Key="RestDayBadgeBackgroundBrush" Color="{StaticResource RestDayBadgeBackgroundColor}" />
+    <SolidColorBrush x:Key="RestDayBadgeForegroundBrush" Color="{StaticResource RestDayBadgeForegroundColor}" />
+    <SolidColorBrush x:Key="WorkdayBadgeBackgroundBrush" Color="{StaticResource WorkdayBadgeBackgroundColor}" />
+    <SolidColorBrush x:Key="WorkdayBadgeForegroundBrush" Color="{StaticResource WorkdayBadgeForegroundColor}" />
+
+</ResourceDictionary>

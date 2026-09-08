@@ -1,0 +1,86 @@
+<UserControl x:Class="WinCal.Views.Controls.DayCell"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Height="{DynamicResource CalendarDayCellHeight}"
+             Cursor="Hand"
+             MouseEnter="OnMouseEnter"
+             MouseLeave="OnMouseLeave"
+             MouseLeftButtonUp="OnDayClick">
+
+    <Border x:Name="CellSurface"
+            Margin="1"
+            Background="Transparent"
+            CornerRadius="10">
+        <Grid>
+            <!-- 独立悬停层仅淡入背景与边框，不缩放文字，保持清晰。 -->
+            <Border x:Name="HoverSurface"
+                    Margin="0"
+                    Background="{DynamicResource HoverBrush}"
+                    BorderBrush="{DynamicResource TodayAccentBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Opacity="0"
+                    IsHitTestVisible="False" />
+
+            <!-- 点击选中使用与悬停一致的整格卡片，避免反馈范围突然缩小。 -->
+            <Border x:Name="SelectedSurface"
+                    CornerRadius="10"
+                    BorderBrush="{DynamicResource TodayAccentBrush}"
+                    BorderThickness="1.5"
+                    Background="{DynamicResource SelectedBrush}"
+                    Opacity="0"
+                    IsHitTestVisible="False" />
+
+            <!-- 今天使用实心强调色 -->
+            <Border x:Name="TodayCircle"
+                    Width="{DynamicResource CalendarDayCircleSize}" Height="{DynamicResource CalendarDayCircleSize}"
+                    CornerRadius="9"
+                    Background="{DynamicResource TodayAccentBrush}"
+                    Visibility="Collapsed"
+                    VerticalAlignment="Top"
+                    Margin="0,1,0,0" />
+
+            <TextBlock x:Name="DayText"
+                       Text="{Binding DayNumber}"
+                       FontSize="{DynamicResource CalendarDayFontSize}"
+                       FontWeight="Normal"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Top"
+                       Margin="0,5,0,0"
+                       Foreground="{DynamicResource TextPrimaryBrush}" />
+
+            <Border x:Name="ScheduleBadge"
+                    Width="{DynamicResource CalendarBadgeSize}" Height="{DynamicResource CalendarBadgeSize}"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,2,1,0"
+                    CornerRadius="4"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="ScheduleLabelText"
+                           FontSize="{DynamicResource CalendarSmallFontSize}"
+                           FontWeight="Bold"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center" />
+            </Border>
+
+            <TextBlock x:Name="LunarText"
+                       FontSize="{DynamicResource CalendarSmallFontSize}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Bottom"
+                       Margin="0,0,0,6"
+                       Foreground="{DynamicResource TextSecondaryBrush}"
+                       Visibility="Collapsed" />
+
+            <StackPanel x:Name="EventDots"
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,5"
+                        Visibility="Collapsed">
+                <Ellipse x:Name="Dot1" Width="3.5" Height="3.5" Margin="1,0" Visibility="Collapsed" />
+                <Ellipse x:Name="Dot2" Width="3.5" Height="3.5" Margin="1,0" Visibility="Collapsed" />
+                <Ellipse x:Name="Dot3" Width="3.5" Height="3.5" Margin="1,0" Visibility="Collapsed" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>
