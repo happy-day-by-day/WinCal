@@ -704,7 +704,7 @@ private:
         {
         case kSettingTheme: return {L"跟随系统", L"浅色", L"深色"};
         case kSettingDataSource: return {L"系统日历", L"ICS 订阅", L"系统日历 + ICS"};
-        case kSettingRefresh: return {L"10 分钟", L"30 分钟", L"60 分钟", L"120 分钟"};
+        case kSettingRefresh: return {L"10 分钟", L"30 分钟", L"60 分钟", L"120 分钟", L"1 天"};
         case kSettingWeekStart: return {L"周日", L"周一"};
         default: return {};
         }
@@ -776,7 +776,9 @@ private:
             urls += url;
         }
         SetDlgItemTextW(window, kSettingIcsUrls, urls.c_str());
-        SetSettingSelection(window, kSettingRefresh, settingsDraft_.icsRefreshMinutes == 10 ? 0 : settingsDraft_.icsRefreshMinutes == 60 ? 2 : settingsDraft_.icsRefreshMinutes == 120 ? 3 : 1);
+        SetSettingSelection(window, kSettingRefresh,
+            settingsDraft_.icsRefreshMinutes == 10 ? 0 : settingsDraft_.icsRefreshMinutes == 60 ? 2 :
+            settingsDraft_.icsRefreshMinutes == 120 ? 3 : settingsDraft_.icsRefreshMinutes == 1440 ? 4 : 1);
         SetSettingSelection(window, kSettingWeekStart, settingsDraft_.weekStartDay == L"Monday" ? 1 : 0);
     }
 
@@ -1672,9 +1674,9 @@ private:
         settingsDraft_.dataSource = source == 1 ? L"IcsUrl" : source == 2 ? L"Both" : L"SystemCalendar";
         settingsDraft_.icsUrls = LinesFromText(ReadControlText(GetDlgItem(window, kSettingIcsUrls)));
         settingsDraft_.icsAliases.resize(settingsDraft_.icsUrls.size());
-        constexpr std::array<int, 4> refreshValues{10, 30, 60, 120};
+        constexpr std::array<int, 5> refreshValues{10, 30, 60, 120, 1440};
         const int refresh = SettingSelection(window, kSettingRefresh);
-        settingsDraft_.icsRefreshMinutes = refreshValues[std::clamp(refresh, 0, 3)];
+        settingsDraft_.icsRefreshMinutes = refreshValues[std::clamp(refresh, 0, 4)];
         settingsDraft_.weekStartDay = SettingSelection(window, kSettingWeekStart) == 1 ? L"Monday" : L"Sunday";
         if (!ApplyAutoStartup(settingsDraft_.autoStartup))
         {
