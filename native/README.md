@@ -1,6 +1,8 @@
-# WinCal Native
+# WinCal Native（主工程）
 
-WinCal 的原生 Win32/C++ 迁移工程。当前阶段提供可运行的低内存 UI 壳，用来冻结原生窗口、托盘、DPI、任务栏定位与输入交互方案；原 WPF 项目暂时保留用于功能对照。
+WinCal 的主工程是原生 Win32/C++ 版本。旧版 WPF 工程已冻结并归档到 `../archive/wpf/`，只用于历史对照和兼容性参考。
+
+运行时保持在一个原生进程内：Win32 窗口、托盘和任务栏拦截负责交互，Direct2D/DirectWrite 负责绘制，C++/WinRT 读取系统日历，WinHTTP 下载 ICS 并写入本地缓存。设置窗口按需创建，关闭后释放其字体、画刷和控件资源。
 
 ## 已实现
 
@@ -35,6 +37,8 @@ WinCal 的原生 Win32/C++ 迁移工程。当前阶段提供可运行的低内�
 - 发布前视觉与交互回归：托盘、任务栏四方向、双屏、DPI、主题、ICS/系统日历合并、日程详情面板
 - 发布目录和版本信息整理
 
+主工程已经可以独立构建和运行；上面两项是正式发布前的收尾工作，不影响原生工程作为默认开发入口。
+
 ## 构建
 
 需要 Visual Studio 2022 C++ Build Tools（Desktop development with C++）。
@@ -47,6 +51,8 @@ WinCal 的原生 Win32/C++ 迁移工程。当前阶段提供可运行的低内�
 
 用 `WinCal.exe --settings` 可以直接打开设置窗口；若已有 WinCal 实例，会复用该进程。
 
+设置和缓存位置分别为 `%LOCALAPPDATA%\miniCal\settings.json` 与 `%LOCALAPPDATA%\WinCal\cache\`。数据源支持 `SystemCalendar`、`IcsUrl` 和 `Both`；ICS 刷新频率包括 10/30/60/120 分钟及 1 天（1440 分钟）。
+
 设置页使用「外观 / 日历来源 / 常规」页签，不内嵌模拟日历。打开设置时同步打开真实日历并并排定位；主题、字号、周起始日立即更新真实日历。设置打开期间日历不会因点击设置而收起，保存后保留修改，取消或关闭设置会恢复原来的外观。开机启动和 ICS 订阅在保存后生效。字体和控件统一使用 DIP，切换显示器 DPI 时重新布局，工作区不足时提供滚动条。设置窗口仍然按需创建，关闭时释放字体、画刷和控件。
 
 设置页离屏检查（不启动托盘、不读写用户配置、不访问日历服务）：
@@ -58,6 +64,8 @@ cmake --build native/build --config Release --target WinCalSettingsPreview
 ```
 
 此目标仅在显式构建时生成，不包含在单体 EXE 中；同时检查字号边界、页签、主题、开关、订阅禁用，以及实时外观更新、取消恢复和保存保留逻辑。
+
+`WinCalSettingsPreview` 是构建期的离屏检查工具，不是发布组件；正式运行只需要安装目录中的单体 `WinCal.exe`。
 
 ## 冒烟验证
 

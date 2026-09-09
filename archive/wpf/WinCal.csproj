@@ -10,7 +10,7 @@
     <AssemblyName>WinCal</AssemblyName>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>Assets\WinCal.ico</ApplicationIcon>
+    <ApplicationIcon>..\..\Assets\WinCal.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -24,7 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Resource Include="Assets\WinCal.ico" />
+    <Resource Include="..\..\Assets\WinCal.ico" />
   </ItemGroup>
 
 </Project>
