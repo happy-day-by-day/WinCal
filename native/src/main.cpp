@@ -40,6 +40,7 @@ constexpr UINT kScheduleOutsideHideMessage = WM_APP + 3;
 constexpr UINT kCalendarDataUpdatedMessage = WM_APP + 4;
 constexpr UINT kSettingsChangedMessage = WM_APP + 5;
 constexpr UINT kShowSettingsMessage = WM_APP + 6;
+constexpr UINT kTaskbarClockClickMessage = WM_APP + 7;
 constexpr UINT kAnimationTimer = 1;
 constexpr UINT kOutsideClickTimer = 2;
 constexpr DWORD kEventObjectUncloak = 0x8018;
@@ -1362,11 +1363,48 @@ private:
                PtInRect(&iconRect, point);
     }
 
+    // Windows 11 does not always raise a new ShellExperienceHost window when
+    // the clock flyout is clicked (especially after it was previously hidden).
+    // Recognize the clock hit directly from the taskbar geometry as a reliable
+    // fallback.  The rightmost taskbar area is reserved for the clock and
+    // notification area on the supported Windows layouts.
+    static bool IsPointInsideTaskbarClock(POINT point)
+    {
+        HWND taskbar = WindowFromPoint(point);
+        wchar_t className[64]{};
+        while (taskbar && GetClassNameW(taskbar, className, ARRAYSIZE(className)) > 0 &&
+               _wcsicmp(className, L"Shell_TrayWnd") != 0 &&
+               _wcsicmp(className, L"Shell_SecondaryTrayWnd") != 0)
+            taskbar = GetParent(taskbar);
+        if (!taskbar)
+            return false;
+
+        RECT taskbarRect{};
+        if (!GetWindowRect(taskbar, &taskbarRect) || !PtInRect(&taskbarRect, point))
+            return false;
+        MONITORINFO monitor{sizeof(monitor)};
+        const HMONITOR hmonitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        if (!GetMonitorInfoW(hmonitor, &monitor)) return false;
+
+        const int dpi = GetDpiForWindow(taskbar);
+        const int clockExtent = MulDiv(240, dpi, 96);
+        const int taskbarHeight = std::max(1, static_cast<int>(taskbarRect.bottom - taskbarRect.top));
+        const int taskbarWidth = std::max(1, static_cast<int>(taskbarRect.right - taskbarRect.left));
+        if (taskbarHeight <= taskbarWidth)
+            return point.x >= taskbarRect.right - clockExtent;
+        return point.y >= taskbarRect.bottom - clockExtent;
+    }
+
     void HandleGlobalMouse(WPARAM message, const MSLLHOOKSTRUCT& mouse) const
     {
         if (settingsLivePreview_) return;
-        if (message != WM_LBUTTONDOWN && message != WM_RBUTTONDOWN && message != WM_MBUTTONDOWN)
+        if (message != WM_LBUTTONDOWN)
             return;
+        if (IsPointInsideTaskbarClock(mouse.pt))
+        {
+            PostMessageW(window_, kTaskbarClockClickMessage, 0, 0);
+            return;
+        }
         if (!IsWindowVisible(window_))
             return;
 
@@ -2705,6 +2743,9 @@ private:
             return 0;
         case kShowPopupMessage:
             ShowPopup(true);
+            return 0;
+        case kTaskbarClockClickMessage:
+            TogglePopup();
             return 0;
         case kScheduleOutsideHideMessage:
             if (!settingsLivePreview_) SetTimer(window_, kOutsideClickTimer, 120, nullptr);
