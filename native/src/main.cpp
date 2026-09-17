@@ -163,6 +163,12 @@ Date CivilFromDays(long long days)
     return {year, static_cast<int>(month), static_cast<int>(day)};
 }
 
+float EaseOutCubic(float t)
+{
+    const float inverse = 1.0f - t;
+    return 1.0f - inverse * inverse * inverse;
+}
+
 Date Today()
 {
     SYSTEMTIME value{};
@@ -385,6 +391,123 @@ public:
         DeleteObject(bitmap);
         DeleteDC(dc);
         DestroyWindow(window);
+        return ok;
+    }
+
+    // Test-only: render calendar frames offscreen (hidden window, software D2D target)
+    // and verify the week-scroll animation settles exactly on the static grid.
+    bool RenderCalendarPreview(HINSTANCE instance, int dpi, bool dark, int dir,
+                               int fromYear, int fromMonth, float progress, const wchar_t* path)
+    {
+        instance_ = instance;
+        dpi_ = dpi;
+        fontScale_ = 1.0f;
+        dark_ = dark;
+        weekStartsMonday_ = false;
+        const int value = fromYear * 12 + fromMonth - 1 + (dir > 0 ? 1 : -1);
+        displayYear_ = value / 12;
+        displayMonth_ = value % 12 + 1;
+        selected_ = Today();
+        scrollDir_ = dir > 0 ? 1 : -1;
+        scrollFromYear_ = fromYear;
+        scrollFromMonth_ = fromMonth;
+        const long long delta =
+            WeekRowStartDays(displayYear_, displayMonth_) - WeekRowStartDays(fromYear, fromMonth);
+        const long long rows = (delta < 0 ? -delta : delta) / 7;
+        scrollRows_ = static_cast<int>(std::clamp(rows, 1LL, 6LL));
+
+        if (!RegisterWindowClass()) return false;
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"WinCal Calendar Preview",
+            WS_POPUP, -32000, -32000, static_cast<int>(Scale(kLogicalWidth)), static_cast<int>(Scale(kLogicalHeight)),
+            nullptr, nullptr, instance, this);
+        if (!window_) return false;
+        // 隐藏窗口的 DC 读不到软件 D2D 目标的呈现结果，放到屏幕外再显示。
+        ShowWindow(window_, SW_SHOWNOACTIVATE);
+
+        std::vector<BYTE> staticPixels, settledPixels, midPixels;
+        const auto capture = [&](std::vector<BYTE>& pixels) {
+            Paint();
+            GdiFlush();
+            // PrintWindow 读的是 DWM 最近一次合成的内容，等一个合成周期再抓。
+            Sleep(120);
+            DwmFlush();
+            RECT client{};
+            GetClientRect(window_, &client);
+            const HDC windowDc = GetDC(window_);
+            const HDC memoryDc = CreateCompatibleDC(windowDc);
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = client.right;
+            info.bmiHeader.biHeight = client.bottom;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            void* bits{};
+            const HBITMAP bitmap = CreateDIBSection(memoryDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+            if (bitmap)
+            {
+                const auto previous = SelectObject(memoryDc, bitmap);
+                const HDC windowDc2 = GetDC(window_);
+                const BOOL printed = PrintWindow(window_, memoryDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
+                if (!printed)
+                    BitBlt(memoryDc, 0, 0, client.right, client.bottom, windowDc2, 0, 0, SRCCOPY);
+                ReleaseDC(window_, windowDc2);
+                SelectObject(memoryDc, previous);
+                pixels.assign(static_cast<BYTE*>(bits),
+                              static_cast<BYTE*>(bits) + client.right * client.bottom * 4);
+                DeleteObject(bitmap);
+            }
+            DeleteDC(memoryDc);
+            ReleaseDC(window_, windowDc);
+            return !pixels.empty();
+        };
+        const auto differingPixels = [](const std::vector<BYTE>& a, const std::vector<BYTE>& b) {
+            size_t count{};
+            for (size_t i = 0; i + 3 < a.size() && i + 3 < b.size(); i += 4)
+            {
+                const int r = a[i] > b[i] ? a[i] - b[i] : b[i] - a[i];
+                const int g = a[i + 1] > b[i + 1] ? a[i + 1] - b[i + 1] : b[i + 1] - a[i + 1];
+                const int bl = a[i + 2] > b[i + 2] ? a[i + 2] - b[i + 2] : b[i + 2] - a[i + 2];
+                if (r > 2 || g > 2 || bl > 2) ++count;
+            }
+            return count;
+        };
+
+        bool ok = EnsureDeviceResources() && renderTarget_ != nullptr;
+        scrollAnimating_ = false;
+        transition_ = 1.0f;
+        ok = ok && capture(staticPixels);
+        scrollAnimating_ = true;
+        scrollProgress_ = 1.0f;
+        ok = ok && capture(settledPixels);
+        scrollProgress_ = std::clamp(progress, 0.0f, 0.99f);
+        ok = ok && capture(midPixels);
+        {
+            const size_t total = staticPixels.size() / 4;
+            const size_t settledDiff = differingPixels(staticPixels, settledPixels);
+            const size_t midDiff = differingPixels(staticPixels, midPixels);
+            const bool framesOk = total > 0 && settledDiff * 1000 <= total && midDiff * 100 >= total;
+            fwprintf_s(stderr, L"calendar preview: total=%zu settledDiff=%zu midDiff=%zu framesOk=%d\n",
+                       total, settledDiff, midDiff, framesOk ? 1 : 0);
+            ok = ok && framesOk;
+
+            BITMAPFILEHEADER header{};
+            header.bfType = 0x4d42;
+            header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
+            header.bfSize = header.bfOffBits + static_cast<DWORD>(midPixels.size());
+            HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            DWORD written{};
+            BITMAPINFOHEADER bmi{sizeof(BITMAPINFOHEADER), Scale(kLogicalWidth),
+                                 Scale(kLogicalHeight), 1, 32, 0, 0, 0, 0, 0};
+            const bool wrote = file != INVALID_HANDLE_VALUE &&
+                WriteFile(file, &header, sizeof(header), &written, nullptr) &&
+                WriteFile(file, &bmi, sizeof(bmi), &written, nullptr) &&
+                WriteFile(file, midPixels.data(), static_cast<DWORD>(midPixels.size()), &written, nullptr);
+            if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+            ok = ok && wrote;
+        }
+        DiscardDeviceResources();
+        DestroyWindow(window_);
+        window_ = nullptr;
         return ok;
     }
 #endif
@@ -1203,6 +1326,7 @@ private:
         selectedEventScroll_ = 0;
         hoveredCell_ = -1;
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
+        scrollAnimating_ = false;
         transition_ = 0.0f;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
         PositionNearTray(preferCursorMonitor);
@@ -1216,6 +1340,7 @@ private:
     {
         SetPropW(window_, L"WinCal.LastHideReason", reinterpret_cast<HANDLE>(reason));
         KillTimer(window_, kAnimationTimer);
+        scrollAnimating_ = false;
         KillTimer(window_, kOutsideClickTimer);
         ShowWindow(window_, SW_HIDE);
         CloseDetailWindow();
@@ -1953,6 +2078,8 @@ private:
 
     void ChangeMonth(int delta)
     {
+        const int fromYear = displayYear_;
+        const int fromMonth = displayMonth_;
         int value = displayYear_ * 12 + displayMonth_ - 1 + delta;
         displayYear_ = value / 12;
         displayMonth_ = value % 12 + 1;
@@ -1962,7 +2089,10 @@ private:
             --displayYear_;
         }
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
-        BeginTransition();
+        if (settings_.monthPaging)
+            BeginScrollTransition(delta > 0 ? 1 : -1, fromYear, fromMonth);
+        else
+            BeginTransition();
     }
 
     void ChangeYear(int delta)
@@ -1975,6 +2105,23 @@ private:
     void BeginTransition()
     {
         transition_ = 0.0f;
+        hoveredCell_ = -1;
+        SetTimer(window_, kAnimationTimer, 16, nullptr);
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    void BeginScrollTransition(int dir, int fromYear, int fromMonth)
+    {
+        scrollDir_ = dir;
+        scrollFromYear_ = fromYear;
+        scrollFromMonth_ = fromMonth;
+        const long long delta =
+            WeekRowStartDays(displayYear_, displayMonth_) - WeekRowStartDays(fromYear, fromMonth);
+        const long long rows = (delta < 0 ? -delta : delta) / 7;
+        scrollRows_ = static_cast<int>(std::clamp(rows, 1LL, 6LL));
+        scrollProgress_ = 0.0f;
+        scrollAnimating_ = true;
+        transition_ = 1.0f;
         hoveredCell_ = -1;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
         InvalidateRect(window_, nullptr, FALSE);
@@ -2264,6 +2411,15 @@ private:
         return CivilFromDays(first - firstColumn + index);
     }
 
+    // 月份网格第一行的真实日期（配置周起始日的当周第一天），逐周滚动的锚点。
+    long long WeekRowStartDays(int year, int month) const
+    {
+        const long long first = DaysFromCivil(year, static_cast<unsigned>(month), 1);
+        const int mondayBasedWeekday = static_cast<int>((first + 3) % 7 + 7) % 7;
+        const int backToWeekStart = weekStartsMonday_ ? mondayBasedWeekday : (mondayBasedWeekday + 1) % 7;
+        return first - backToWeekStart;
+    }
+
     void DrawCalendarCell(const Theme& theme, const Date& today, const Date& date,
                           bool inMonth, int column, float topLogical, bool hovered, float alpha)
     {
@@ -2354,6 +2510,30 @@ private:
                 theme, today, date, date.month == month, column,
                 static_cast<float>(kGridTop + row * kCellHeight), index == hoveredCell_, alpha);
         }
+    }
+
+    // 逐周平滑滚动：把网格渲染成以源月份首行为锚点的连续周行列表。
+    void DrawWeekRows(const Theme& theme, const Date& today)
+    {
+        const float position = scrollDir_ * scrollRows_ * EaseOutCubic(scrollProgress_);
+        const long long anchor = WeekRowStartDays(scrollFromYear_, scrollFromMonth_);
+        const int firstRow = static_cast<int>(std::floor(position));
+        const float gridBottom = static_cast<float>(kGridTop + 6 * kCellHeight);
+        const auto clip = D2D1::RectF(0, Scale(kGridTop), Scale(kLogicalWidth), Scale(gridBottom));
+        renderTarget_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        for (int row = firstRow; row <= firstRow + 7; ++row)
+        {
+            const float top = kGridTop + (row - position) * kCellHeight;
+            if (top >= gridBottom || top + kCellHeight <= kGridTop)
+                continue;
+            for (int column = 0; column < 7; ++column)
+            {
+                const Date date = CivilFromDays(anchor + row * 7 + column);
+                DrawCalendarCell(theme, today, date, date.month == displayMonth_,
+                                 column, top, false, 1.0f);
+            }
+        }
+        renderTarget_->PopAxisAlignedClip();
     }
 
     void ReportRenderFailure(const wchar_t* stage, HRESULT result)
@@ -2486,7 +2666,21 @@ private:
 
         wchar_t title[64]{};
         swprintf_s(title, L"%d年%d月", displayYear_, displayMonth_);
-        DrawText(title, titleFormat_.Get(), D2D1::RectF(Scale(22), Scale(kHeaderTop), Scale(260), Scale(62)), theme.primary);
+        const auto titleRect = D2D1::RectF(Scale(22), Scale(kHeaderTop), Scale(260), Scale(62));
+        if (scrollAnimating_)
+        {
+            const float progress = EaseOutCubic(scrollProgress_);
+            wchar_t fromTitle[64]{};
+            swprintf_s(fromTitle, L"%d年%d月", scrollFromYear_, scrollFromMonth_);
+            if (progress < 1.0f)
+                DrawText(fromTitle, titleFormat_.Get(), titleRect, theme.primary, 1.0f - progress);
+            if (progress > 0.0f)
+                DrawText(title, titleFormat_.Get(), titleRect, theme.primary, progress);
+        }
+        else
+        {
+            DrawText(title, titleFormat_.Get(), titleRect, theme.primary);
+        }
 
         const auto today = Today();
 
@@ -2512,7 +2706,10 @@ private:
                 (weekStartsMonday_ ? column >= 5 : column == 0 || column == 6) ? theme.accent : theme.secondary);
         }
 
-        DrawMonthGrid(theme, today, displayYear_, displayMonth_, 0.45f + transition_ * 0.55f);
+        if (scrollAnimating_)
+            DrawWeekRows(theme, today);
+        else
+            DrawMonthGrid(theme, today, displayYear_, displayMonth_, 0.45f + transition_ * 0.55f);
 
         const float cardTop = Scale(kScheduleTop);
         const auto cardBrush = Brush(theme.card);
@@ -2674,9 +2871,16 @@ private:
                 selectedEventScroll_ = 0;
                 if (selected_.year != displayYear_ || selected_.month != displayMonth_)
                 {
+                    const int fromYear = displayYear_;
+                    const int fromMonth = displayMonth_;
                     displayYear_ = selected_.year;
                     displayMonth_ = selected_.month;
-                    BeginTransition();
+                    const int monthDelta =
+                        (selected_.year * 12 + selected_.month) - (fromYear * 12 + fromMonth);
+                    if (settings_.monthPaging && (monthDelta == 1 || monthDelta == -1))
+                        BeginScrollTransition(monthDelta > 0 ? 1 : -1, fromYear, fromMonth);
+                    else
+                        BeginTransition();
                 }
                 InvalidateRect(window_, nullptr, FALSE);
             }
@@ -2708,9 +2912,21 @@ private:
         case WM_TIMER:
             if (wParam == kAnimationTimer)
             {
-                transition_ = std::min(1.0f, transition_ + 0.055f);
-                if (transition_ >= 1.0f)
-                    KillTimer(window_, kAnimationTimer);
+                if (scrollAnimating_)
+                {
+                    scrollProgress_ = std::min(1.0f, scrollProgress_ + 0.058f);
+                    if (scrollProgress_ >= 1.0f)
+                    {
+                        scrollAnimating_ = false;
+                        KillTimer(window_, kAnimationTimer);
+                    }
+                }
+                else
+                {
+                    transition_ = std::min(1.0f, transition_ + 0.055f);
+                    if (transition_ >= 1.0f)
+                        KillTimer(window_, kAnimationTimer);
+                }
                 InvalidateRect(window_, nullptr, FALSE);
                 return 0;
             }
@@ -2845,6 +3061,12 @@ private:
     int hoveredCell_{-1};
     int selectedEventScroll_{};
     float transition_{1.0f};
+    bool scrollAnimating_{};
+    float scrollProgress_{};
+    int scrollDir_{1};
+    int scrollFromYear_{};
+    int scrollFromMonth_{};
+    int scrollRows_{};
     wincal::CalendarData calendarData_;
     wincal::LunarCalendar lunarCalendar_;
     std::vector<std::jthread> calendarRefreshThreads_;
