@@ -540,7 +540,7 @@ Task 3 放入的 `DrawMonthGrid(...)` 调用替换为：
             --displayYear_;
         }
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
-        if (settings_.monthPaging)
+        if (!settings_.monthPaging)
             BeginScrollTransition(delta > 0 ? 1 : -1, fromYear, fromMonth);
         else
             BeginTransition();
@@ -563,7 +563,7 @@ Task 3 放入的 `DrawMonthGrid(...)` 调用替换为：
                     displayMonth_ = selected_.month;
                     const int monthDelta =
                         (selected_.year * 12 + selected_.month) - (fromYear * 12 + fromMonth);
-                    if (settings_.monthPaging && (monthDelta == 1 || monthDelta == -1))
+                    if (!settings_.monthPaging && (monthDelta == 1 || monthDelta == -1))
                         BeginScrollTransition(monthDelta > 0 ? 1 : -1, fromYear, fromMonth);
                     else
                         BeginTransition();

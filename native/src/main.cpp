@@ -421,44 +421,60 @@ public:
             WS_POPUP, -32000, -32000, static_cast<int>(Scale(kLogicalWidth)), static_cast<int>(Scale(kLogicalHeight)),
             nullptr, nullptr, instance, this);
         if (!window_) return false;
-        // 隐藏窗口的 DC 读不到软件 D2D 目标的呈现结果，放到屏幕外再显示。
+        // 屏幕外显示（PrintWindow 读不到未合成内容，但内容本身需要呈现管线）。
         ShowWindow(window_, SW_SHOWNOACTIVATE);
+        if (!EnsureDeviceResources() || !renderTarget_)
+        {
+            DestroyWindow(window_);
+            window_ = nullptr;
+            return false;
+        }
 
+        const int width = static_cast<int>(Scale(kLogicalWidth));
+        const int height = static_cast<int>(Scale(kLogicalHeight));
         std::vector<BYTE> staticPixels, settledPixels, midPixels;
         const auto capture = [&](std::vector<BYTE>& pixels) {
-            Paint();
-            GdiFlush();
-            // PrintWindow 读的是 DWM 最近一次合成的内容，等一个合成周期再抓。
-            Sleep(120);
-            DwmFlush();
-            RECT client{};
-            GetClientRect(window_, &client);
-            const HDC windowDc = GetDC(window_);
-            const HDC memoryDc = CreateCompatibleDC(windowDc);
-            BITMAPINFO info{};
-            info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            info.bmiHeader.biWidth = client.right;
-            info.bmiHeader.biHeight = client.bottom;
-            info.bmiHeader.biPlanes = 1;
-            info.bmiHeader.biBitCount = 32;
-            void* bits{};
-            const HBITMAP bitmap = CreateDIBSection(memoryDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-            if (bitmap)
+            // PrintWindow 读的是 DWM 最近一次合成的画面，可能滞后成全黑；
+            // 背景色（浅/深主题）都不是纯黑，全黑就再等一轮合成重试。
+            for (int attempt = 0; attempt < 20; ++attempt)
             {
-                const auto previous = SelectObject(memoryDc, bitmap);
-                const HDC windowDc2 = GetDC(window_);
-                const BOOL printed = PrintWindow(window_, memoryDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
-                if (!printed)
-                    BitBlt(memoryDc, 0, 0, client.right, client.bottom, windowDc2, 0, 0, SRCCOPY);
-                ReleaseDC(window_, windowDc2);
-                SelectObject(memoryDc, previous);
-                pixels.assign(static_cast<BYTE*>(bits),
-                              static_cast<BYTE*>(bits) + client.right * client.bottom * 4);
-                DeleteObject(bitmap);
+                Paint();
+                GdiFlush();
+                Sleep(60);
+                RECT client{};
+                GetClientRect(window_, &client);
+                const HDC windowDc = GetDC(window_);
+                const HDC memoryDc = CreateCompatibleDC(windowDc);
+                BITMAPINFO info{};
+                info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                info.bmiHeader.biWidth = client.right;
+                info.bmiHeader.biHeight = client.bottom;
+                info.bmiHeader.biPlanes = 1;
+                info.bmiHeader.biBitCount = 32;
+                void* bits{};
+                const HBITMAP bitmap = CreateDIBSection(memoryDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+                bool hasContent = false;
+                if (bitmap)
+                {
+                    const auto previous = SelectObject(memoryDc, bitmap);
+                    const BOOL printed = PrintWindow(window_, memoryDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
+                    if (!printed)
+                        BitBlt(memoryDc, 0, 0, client.right, client.bottom, windowDc, 0, 0, SRCCOPY);
+                    SelectObject(memoryDc, previous);
+                    const auto first = static_cast<BYTE*>(bits);
+                    const auto last = first + static_cast<size_t>(client.right) * client.bottom * 4;
+                    for (auto i = first; i + 3 < last; i += 4)
+                        if ((i[0] | i[1] | i[2]) != 0) { hasContent = true; break; }
+                    if (hasContent)
+                        pixels.assign(first, last);
+                    DeleteObject(bitmap);
+                }
+                DeleteDC(memoryDc);
+                ReleaseDC(window_, windowDc);
+                if (hasContent)
+                    return true;
             }
-            DeleteDC(memoryDc);
-            ReleaseDC(window_, windowDc);
-            return !pixels.empty();
+            return false;
         };
         const auto differingPixels = [](const std::vector<BYTE>& a, const std::vector<BYTE>& b) {
             size_t count{};
@@ -472,10 +488,9 @@ public:
             return count;
         };
 
-        bool ok = EnsureDeviceResources() && renderTarget_ != nullptr;
         scrollAnimating_ = false;
         transition_ = 1.0f;
-        ok = ok && capture(staticPixels);
+        bool ok = capture(staticPixels);
         scrollAnimating_ = true;
         scrollProgress_ = 1.0f;
         ok = ok && capture(settledPixels);
@@ -496,8 +511,7 @@ public:
             header.bfSize = header.bfOffBits + static_cast<DWORD>(midPixels.size());
             HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             DWORD written{};
-            BITMAPINFOHEADER bmi{sizeof(BITMAPINFOHEADER), Scale(kLogicalWidth),
-                                 Scale(kLogicalHeight), 1, 32, 0, 0, 0, 0, 0};
+            BITMAPINFOHEADER bmi{sizeof(BITMAPINFOHEADER), width, height, 1, 32, 0, 0, 0, 0, 0};
             const bool wrote = file != INVALID_HANDLE_VALUE &&
                 WriteFile(file, &header, sizeof(header), &written, nullptr) &&
                 WriteFile(file, &bmi, sizeof(bmi), &written, nullptr) &&
@@ -2089,7 +2103,7 @@ private:
             --displayYear_;
         }
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
-        if (settings_.monthPaging)
+        if (!settings_.monthPaging)
             BeginScrollTransition(delta > 0 ? 1 : -1, fromYear, fromMonth);
         else
             BeginTransition();
@@ -2574,6 +2588,7 @@ private:
             RECT rect{};
             GetClientRect(window_, &rect);
             const D2D1_SIZE_U size{static_cast<UINT32>(rect.right), static_cast<UINT32>(rect.bottom)};
+            ComPtr<ID2D1HwndRenderTarget> hwndTarget;
             const HRESULT result = factory_->CreateHwndRenderTarget(
                 D2D1::RenderTargetProperties(
                     D2D1_RENDER_TARGET_TYPE_SOFTWARE,
@@ -2581,12 +2596,13 @@ private:
                     96.0f,
                     96.0f),
                 D2D1::HwndRenderTargetProperties(window_, size),
-                renderTarget_.ReleaseAndGetAddressOf());
+                hwndTarget.ReleaseAndGetAddressOf());
             if (FAILED(result))
             {
                 ReportRenderFailure(L"render target", result);
                 return false;
             }
+            renderTarget_ = hwndTarget;
         }
 
         if (!titleFormat_)
@@ -2772,6 +2788,10 @@ private:
         bodyFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
         const HRESULT result = renderTarget_->EndDraw();
+#ifdef WINCAL_SETTINGS_PREVIEW
+        if (FAILED(result))
+            fwprintf_s(stderr, L"Paint EndDraw hr=0x%08X\n", static_cast<unsigned>(result));
+#endif
         if (result == D2DERR_RECREATE_TARGET)
             DiscardDeviceResources();
     }
@@ -2810,7 +2830,8 @@ private:
             return 1;
         case WM_SIZE:
             if (renderTarget_)
-                renderTarget_->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
+                static_cast<ID2D1HwndRenderTarget*>(renderTarget_.Get())
+                    ->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
             return 0;
         case WM_DPICHANGED:
         {
@@ -2877,7 +2898,7 @@ private:
                     displayMonth_ = selected_.month;
                     const int monthDelta =
                         (selected_.year * 12 + selected_.month) - (fromYear * 12 + fromMonth);
-                    if (settings_.monthPaging && (monthDelta == 1 || monthDelta == -1))
+                    if (!settings_.monthPaging && (monthDelta == 1 || monthDelta == -1))
                         BeginScrollTransition(monthDelta > 0 ? 1 : -1, fromYear, fromMonth);
                     else
                         BeginTransition();
@@ -3076,7 +3097,7 @@ private:
     bool systemCalendarWorkerRunning_{};
 
     ComPtr<ID2D1Factory> factory_;
-    ComPtr<ID2D1HwndRenderTarget> renderTarget_;
+    ComPtr<ID2D1RenderTarget> renderTarget_;
     ComPtr<IDWriteFactory> writeFactory_;
     ComPtr<IDWriteTextFormat> titleFormat_;
     ComPtr<IDWriteTextFormat> bodyFormat_;
