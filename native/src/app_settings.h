@@ -17,6 +17,7 @@ struct AppSettings
     int icsRefreshMinutes{30};
     int upcomingDays{3};
     std::wstring weekStartDay{L"Sunday"};
+    bool monthPaging{true};
 };
 
 class SettingsStore

@@ -236,6 +236,7 @@ AppSettings SettingsStore::Load()
     settings.icsRefreshMinutes = std::clamp(IntegerValue(content, "IcsRefreshMinutes", 30), 1, 1440);
     settings.upcomingDays = std::clamp(IntegerValue(content, "UpcomingDays", 3), 1, 30);
     settings.weekStartDay = Utf8ToWide(StringValue(content, "WeekStartDay", "Sunday"));
+    settings.monthPaging = BoolValue(content, "MonthPaging", true);
     return settings;
 }
 
@@ -255,7 +256,8 @@ bool SettingsStore::Save(const AppSettings& settings)
     AppendArray(json, "IcsAliases", settings.icsAliases);
     json += "  \"IcsRefreshMinutes\": " + std::to_string(settings.icsRefreshMinutes) + ",\n";
     json += "  \"UpcomingDays\": " + std::to_string(settings.upcomingDays) + ",\n";
-    json += "  \"WeekStartDay\": \"" + EscapeJson(settings.weekStartDay) + "\"\n}\n";
+    json += "  \"WeekStartDay\": \"" + EscapeJson(settings.weekStartDay) + "\",\n";
+    json += "  \"MonthPaging\": " + std::string(settings.monthPaging ? "true" : "false") + "\n}\n";
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream.write(json.data(), static_cast<std::streamsize>(json.size()));
     return static_cast<bool>(stream);

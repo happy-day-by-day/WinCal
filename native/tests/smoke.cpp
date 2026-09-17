@@ -28,6 +28,13 @@ int main()
         return 3;
     }
 
+    wincal::AppSettings defaults;
+    if (!defaults.monthPaging)
+    {
+        std::wcerr << L"MonthPaging default should be true.\n";
+        return 4;
+    }
+
     std::cout << "lunarLength=" << todayText.size()
               << "; sourceLength=" << settings.dataSource.size()
               << "; urls=" << settings.icsUrls.size()
