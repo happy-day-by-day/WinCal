@@ -2513,21 +2513,12 @@ private:
         const auto selectedEvents = calendarData_.EventsForDate(selected_.year, selected_.month, selected_.day);
         if (selectedEvents.empty())
         {
-            wchar_t status[128]{};
-            const size_t eventCount = calendarData_.EventCount();
-            const size_t icsCount = calendarData_.IcsEventCount();
-            const size_t systemCount = calendarData_.SystemEventCount();
             const auto systemState = calendarData_.SystemState();
+            const wchar_t* status = L"当天暂无日程";
             if (systemState == wincal::SystemCalendarState::Loading)
-                swprintf_s(status, L"已加载 %zu 个事件 · 系统日历加载中", eventCount);
-            else if (systemState == wincal::SystemCalendarState::Available)
-                swprintf_s(status, L"已加载 %zu 个事件 · 系统 %zu / ICS %zu", eventCount, systemCount, icsCount);
+                status = L"系统日历加载中";
             else if (systemState == wincal::SystemCalendarState::Unavailable)
-                swprintf_s(status, L"已加载 %zu 个事件 · 系统日历不可用", eventCount);
-            else if (eventCount > 0)
-                swprintf_s(status, L"近期没有日程 · 已从缓存加载 %zu 个事件", eventCount);
-            else
-                wcscpy_s(status, L"未找到可用的 ICS 缓存");
+                status = L"系统日历不可用 · 当天暂无日程";
             DrawText(
                 status, bodyFormat_.Get(),
                 D2D1::RectF(Scale(34), Scale(kScheduleFirstRow), Scale(390), Scale(kScheduleFirstRow + 40)),
