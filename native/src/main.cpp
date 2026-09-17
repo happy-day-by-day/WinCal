@@ -2256,12 +2256,104 @@ private:
         }
     }
 
-    Date DateForCell(int index) const
+    Date DateForCell(int year, int month, int index) const
     {
-        const long long first = DaysFromCivil(displayYear_, static_cast<unsigned>(displayMonth_), 1);
+        const long long first = DaysFromCivil(year, static_cast<unsigned>(month), 1);
         const int mondayBasedWeekday = static_cast<int>((first + 3) % 7 + 7) % 7;
         const int firstColumn = weekStartsMonday_ ? mondayBasedWeekday : (mondayBasedWeekday + 1) % 7;
         return CivilFromDays(first - firstColumn + index);
+    }
+
+    void DrawCalendarCell(const Theme& theme, const Date& today, const Date& date,
+                          bool inMonth, int column, float topLogical, bool hovered, float alpha)
+    {
+        const float left = Scale(static_cast<float>(kGridLeft + column * kCellWidth));
+        const float top = Scale(topLogical);
+        const auto rect = D2D1::RectF(
+            left + Scale(3), top + Scale(3), left + Scale(kCellWidth - 3), top + Scale(kCellHeight - 3));
+        const bool isToday = date == today;
+        const bool selected = date == selected_;
+        const bool hasEvents = calendarData_.HasEvents(date.year, date.month, date.day);
+        const auto schedule = calendarData_.ScheduleForDate(date.year, date.month, date.day);
+
+        if (hovered)
+        {
+            const auto hover = Brush(theme.hover, alpha);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(9), Scale(9)), hover.Get());
+        }
+        if (selected)
+        {
+            const auto accent = Brush(theme.accent, alpha);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(9), Scale(9)), accent.Get());
+        }
+        else if (isToday)
+        {
+            const auto accent = Brush(theme.accent, alpha);
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(rect, Scale(9), Scale(9)), accent.Get(), Scale(1.5f));
+        }
+
+        wchar_t number[4]{};
+        swprintf_s(number, L"%d", date.day);
+        DrawText(
+            number,
+            dayFormat_.Get(),
+            D2D1::RectF(rect.left, rect.top + Scale(1), rect.right, rect.top + Scale(25)),
+            selected ? D2D1::ColorF(0xFFFFFF) : (inMonth ? theme.primary : theme.muted),
+            alpha);
+
+        const auto lunar = lunarCalendar_.TextForDate(date.year, date.month, date.day);
+        if (!lunar.empty())
+        {
+            DrawText(
+                lunar.c_str(),
+                lunarFormat_.Get(),
+                D2D1::RectF(rect.left + Scale(1), rect.top + Scale(22), rect.right - Scale(1), rect.bottom - Scale(7)),
+                selected ? D2D1::ColorF(0xFFFFFF) : (inMonth ? theme.secondary : theme.muted),
+                alpha);
+        }
+
+        if (schedule != wincal::ScheduleLabel::None)
+        {
+            const bool isRest = schedule == wincal::ScheduleLabel::Rest;
+            const auto badgeRect = D2D1::RectF(
+                rect.right - Scale(17), rect.top + Scale(1),
+                rect.right - Scale(1), rect.top + Scale(17));
+            const auto badgeBackground = Brush(
+                isRest ? theme.restBadgeBackground : theme.workBadgeBackground,
+                alpha);
+            renderTarget_->FillRoundedRectangle(
+                D2D1::RoundedRect(badgeRect, Scale(4), Scale(4)), badgeBackground.Get());
+            DrawText(
+                isRest ? L"休" : L"班",
+                badgeFormat_.Get(), badgeRect,
+                isRest ? theme.restBadgeForeground : theme.workBadgeForeground,
+                alpha);
+        }
+
+        if (hasEvents)
+        {
+            const auto dot = Brush(
+                selected ? D2D1::ColorF(0xFFFFFF) : theme.eventDot,
+                alpha);
+            renderTarget_->FillEllipse(
+                D2D1::Ellipse(
+                    D2D1::Point2F((rect.left + rect.right) / 2, rect.bottom - Scale(3)),
+                    Scale(1.75f), Scale(1.75f)),
+                dot.Get());
+        }
+    }
+
+    void DrawMonthGrid(const Theme& theme, const Date& today, int year, int month, float alpha)
+    {
+        for (int index = 0; index < 42; ++index)
+        {
+            const int row = index / 7;
+            const int column = index % 7;
+            const auto date = DateForCell(year, month, index);
+            DrawCalendarCell(
+                theme, today, date, date.month == month, column,
+                static_cast<float>(kGridTop + row * kCellHeight), index == hoveredCell_, alpha);
+        }
     }
 
     void ReportRenderFailure(const wchar_t* stage, HRESULT result)
@@ -2420,88 +2512,7 @@ private:
                 (weekStartsMonday_ ? column >= 5 : column == 0 || column == 6) ? theme.accent : theme.secondary);
         }
 
-        const float contentOpacity = 0.45f + transition_ * 0.55f;
-        for (int index = 0; index < 42; ++index)
-        {
-            const int row = index / 7;
-            const int column = index % 7;
-            const float left = Scale(static_cast<float>(kGridLeft + column * kCellWidth));
-            const float top = Scale(static_cast<float>(kGridTop + row * kCellHeight));
-            const auto rect = D2D1::RectF(
-                left + Scale(3), top + Scale(3), left + Scale(kCellWidth - 3), top + Scale(kCellHeight - 3));
-            const auto date = DateForCell(index);
-            const bool inMonth = date.month == displayMonth_;
-            const bool isToday = date == today;
-            const bool selected = date == selected_;
-            const bool hasEvents = calendarData_.HasEvents(date.year, date.month, date.day);
-            const auto schedule = calendarData_.ScheduleForDate(date.year, date.month, date.day);
-
-            if (index == hoveredCell_)
-            {
-                const auto hover = Brush(theme.hover, contentOpacity);
-                renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(9), Scale(9)), hover.Get());
-            }
-            if (selected)
-            {
-                const auto accent = Brush(theme.accent, contentOpacity);
-                renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(9), Scale(9)), accent.Get());
-            }
-            else if (isToday)
-            {
-                const auto accent = Brush(theme.accent, contentOpacity);
-                renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(rect, Scale(9), Scale(9)), accent.Get(), Scale(1.5f));
-            }
-
-            wchar_t number[4]{};
-            swprintf_s(number, L"%d", date.day);
-            DrawText(
-                number,
-                dayFormat_.Get(),
-                D2D1::RectF(rect.left, rect.top + Scale(1), rect.right, rect.top + Scale(25)),
-                selected ? D2D1::ColorF(0xFFFFFF) : (inMonth ? theme.primary : theme.muted),
-                contentOpacity);
-
-            const auto lunar = lunarCalendar_.TextForDate(date.year, date.month, date.day);
-            if (!lunar.empty())
-            {
-                DrawText(
-                    lunar.c_str(),
-                    lunarFormat_.Get(),
-                    D2D1::RectF(rect.left + Scale(1), rect.top + Scale(22), rect.right - Scale(1), rect.bottom - Scale(7)),
-                    selected ? D2D1::ColorF(0xFFFFFF) : (inMonth ? theme.secondary : theme.muted),
-                    contentOpacity);
-            }
-
-            if (schedule != wincal::ScheduleLabel::None)
-            {
-                const bool isRest = schedule == wincal::ScheduleLabel::Rest;
-                const auto badgeRect = D2D1::RectF(
-                    rect.right - Scale(17), rect.top + Scale(1),
-                    rect.right - Scale(1), rect.top + Scale(17));
-                const auto badgeBackground = Brush(
-                    isRest ? theme.restBadgeBackground : theme.workBadgeBackground,
-                    contentOpacity);
-                renderTarget_->FillRoundedRectangle(
-                    D2D1::RoundedRect(badgeRect, Scale(4), Scale(4)), badgeBackground.Get());
-                DrawText(
-                    isRest ? L"休" : L"班",
-                    badgeFormat_.Get(), badgeRect,
-                    isRest ? theme.restBadgeForeground : theme.workBadgeForeground,
-                    contentOpacity);
-            }
-
-            if (hasEvents)
-            {
-                const auto dot = Brush(
-                    selected ? D2D1::ColorF(0xFFFFFF) : theme.eventDot,
-                    contentOpacity);
-                renderTarget_->FillEllipse(
-                    D2D1::Ellipse(
-                        D2D1::Point2F((rect.left + rect.right) / 2, rect.bottom - Scale(3)),
-                        Scale(1.75f), Scale(1.75f)),
-                    dot.Get());
-            }
-        }
+        DrawMonthGrid(theme, today, displayYear_, displayMonth_, 0.45f + transition_ * 0.55f);
 
         const float cardTop = Scale(kScheduleTop);
         const auto cardBrush = Brush(theme.card);
@@ -2659,7 +2670,7 @@ private:
             if (hit >= 0)
             {
                 CloseDetailWindow();
-                selected_ = DateForCell(hit);
+                selected_ = DateForCell(displayYear_, displayMonth_, hit);
                 selectedEventScroll_ = 0;
                 if (selected_.year != displayYear_ || selected_.month != displayMonth_)
                 {
