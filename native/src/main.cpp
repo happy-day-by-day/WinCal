@@ -77,6 +77,7 @@ constexpr int kSettingDataSource = 2004;
 constexpr int kSettingIcsUrls = 2005;
 constexpr int kSettingRefresh = 2006;
 constexpr int kSettingWeekStart = 2007;
+constexpr int kSettingMonthPaging = 2008;
 constexpr int kSettingSave = 2010;
 constexpr int kSettingDefaults = 2011;
 constexpr int kSettingCancel = 2012;
@@ -781,6 +782,7 @@ private:
             settingsDraft_.icsRefreshMinutes == 10 ? 0 : settingsDraft_.icsRefreshMinutes == 60 ? 2 :
             settingsDraft_.icsRefreshMinutes == 120 ? 3 : settingsDraft_.icsRefreshMinutes == 1440 ? 4 : 1);
         SetSettingSelection(window, kSettingWeekStart, settingsDraft_.weekStartDay == L"Monday" ? 1 : 0);
+        SetSettingSelection(window, kSettingMonthPaging, settingsDraft_.monthPaging ? 1 : 0);
     }
 
     void SelectSettingsPage(HWND window, int page)
@@ -874,6 +876,7 @@ private:
 
         button(L"开机启动", kSettingAutoStartup, 410, 190, 56, 30, 2);
         button(L"", kSettingWeekStart, 266, 270, 200, 38, 2);
+        button(L"整月翻滚", kSettingMonthPaging, 410, 352, 56, 30, 2);
 
         button(L"恢复默认", kSettingDefaults, 28, 532, 104, 36);
         button(L"取消", kSettingCancel, 272, 532, 88, 36);
@@ -1074,6 +1077,8 @@ private:
             SettingsText(dc, L"登录 Windows 后自动运行 WinCal", 48, 212, 338, 20, settingsCaptionFont_, p.secondary);
             SettingsText(dc, L"每周开始", 48, 268, 200, 24, settingsBodyFont_, p.primary);
             SettingsText(dc, L"选择日历每一行的第一天", 48, 294, 210, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"整月翻滚", 48, 352, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"关闭后翻月时逐周平滑滚动", 48, 378, 338, 20, settingsCaptionFont_, p.secondary);
             SettingsText(dc, L"显示顺序会立即同步到日历窗口。", 48, 446, 418, 24, settingsCaptionFont_, p.secondary);
         }
 
@@ -1093,7 +1098,7 @@ private:
         const bool pressed = (item.itemState & ODS_SELECTED) != 0;
         const bool tab = id >= kSettingPageAppearance && id <= kSettingPageGeneral;
         const bool theme = id == kSettingTheme || id == kSettingThemeLight || id == kSettingThemeDark;
-        const bool toggle = id == kSettingAutoStartup;
+        const bool toggle = id == kSettingAutoStartup || id == kSettingMonthPaging;
         const bool dropdown = !theme && !SettingOptions(id).empty();
         const bool active = (tab && settingsPage_ == id - kSettingPageAppearance) ||
             (theme && SettingSelection(settingsWindow_, kSettingTheme) == (id == kSettingTheme ? 0 : id == kSettingThemeLight ? 1 : 2));
@@ -1716,6 +1721,7 @@ private:
         const int refresh = SettingSelection(window, kSettingRefresh);
         settingsDraft_.icsRefreshMinutes = refreshValues[std::clamp(refresh, 0, 4)];
         settingsDraft_.weekStartDay = SettingSelection(window, kSettingWeekStart) == 1 ? L"Monday" : L"Sunday";
+        settingsDraft_.monthPaging = SettingSelection(window, kSettingMonthPaging) != 0;
         if (!ApplyAutoStartup(settingsDraft_.autoStartup))
         {
             MessageBoxW(window, L"更新开机启动项失败。", L"WinCal", MB_OK | MB_ICONWARNING);
@@ -1870,7 +1876,7 @@ private:
                         std::clamp((valid ? value : 0) + (id == kSettingFontPlus ? 1 : -1), -2, 10)), TRUE);
                     return 0;
                 }
-                if (id == kSettingAutoStartup)
+                if (id == kSettingAutoStartup || id == kSettingMonthPaging)
                 {
                     SetSettingSelection(window, id, !SettingSelection(window, id));
                     InvalidateRect(window, nullptr, FALSE);
