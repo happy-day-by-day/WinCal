@@ -549,15 +549,21 @@ public:
 
         scrollAnimating_ = false;
         slideAnimating_ = false;
+        slidePos_ = 0.0f;
+        slideTarget_ = 0.0f;
         transition_ = 1.0f;
         bool ok = capture(staticPixels);
+        const int trackDir = dir > 0 ? 1 : -1;
         if (slide)
             slideAnimating_ = true;
         else
             scrollAnimating_ = true;
-        scrollProgress_ = slideProgress_ = 1.0f;
+        scrollProgress_ = 1.0f;
+        slidePos_ = slideTarget_ = static_cast<float>(trackDir);
         ok = ok && capture(settledPixels);
-        scrollProgress_ = slideProgress_ = std::clamp(progress, 0.0f, 0.99f);
+        slideTarget_ = static_cast<float>(trackDir);
+        slidePos_ = trackDir * std::clamp(progress, 0.0f, 0.99f);
+        scrollProgress_ = std::clamp(progress, 0.0f, 0.99f);
         ok = ok && capture(midPixels);
         {
             const size_t total = staticPixels.size() / 4;
@@ -1408,6 +1414,8 @@ private:
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
         scrollAnimating_ = false;
         slideAnimating_ = false;
+        slidePos_ = 0.0f;
+        slideTarget_ = 0.0f;
         transition_ = 0.0f;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
         PositionNearTray(preferCursorMonitor);
@@ -1423,6 +1431,8 @@ private:
         KillTimer(window_, kAnimationTimer);
         scrollAnimating_ = false;
         slideAnimating_ = false;
+        slidePos_ = 0.0f;
+        slideTarget_ = 0.0f;
         KillTimer(window_, kOutsideClickTimer);
         ShowWindow(window_, SW_HIDE);
         CloseDetailWindow();
@@ -2186,6 +2196,9 @@ private:
 
     void BeginTransition()
     {
+        slideAnimating_ = false;
+        slidePos_ = 0.0f;
+        slideTarget_ = 0.0f;
         transition_ = 0.0f;
         hoveredCell_ = -1;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
@@ -2209,18 +2222,33 @@ private:
         InvalidateRect(window_, nullptr, FALSE);
     }
 
-    // 整月翻滚：当前月与相邻月整页同时渲染、在同一竖直轨道上平移。
-    void BeginMonthSlide(int dir, int fromYear, int fromMonth)
+    // 整月翻滚：虚拟滚动轨道。滚轮/按键不断累积目标位置（slideTarget_，单位 =
+    // 一页网格高），轨道位置 slidePos_ 每帧指数逼近目标；连续滚动时月份像列表
+    // 一样连续经过，而不是每刻度一次独立动画。
+    void BeginMonthSlide(int delta, int fromYear, int fromMonth)
     {
-        scrollDir_ = dir;
-        scrollFromYear_ = fromYear;
-        scrollFromMonth_ = fromMonth;
-        slideProgress_ = 0.0f;
+        if (!slideAnimating_)
+        {
+            scrollFromYear_ = fromYear;
+            scrollFromMonth_ = fromMonth;
+            slidePos_ = 0.0f;
+            slideTarget_ = 0.0f;
+        }
+        scrollDir_ = delta > 0 ? 1 : -1;
+        slideTarget_ += delta;
         slideAnimating_ = true;
         transition_ = 1.0f;
         hoveredCell_ = -1;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
         InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    // 轨道索引 → 年月（索引可为负，基于链起点月份）。
+    void MonthTrackIndex(int index, int& year, int& month) const
+    {
+        const int total = scrollFromYear_ * 12 + scrollFromMonth_ - 1 + index;
+        year = total / 12;
+        month = total % 12 + 1;
     }
 
     float Scale(float value) const
@@ -2634,17 +2662,23 @@ private:
         renderTarget_->PopAxisAlignedClip();
     }
 
-    // 整月翻滚：新既单月网格像虚拟滚动轨道一样整体上下平移，日期按需即时生成。
+    // 整月翻滚：按轨道位置渲染相邻两页单月网格，轨道连续平移。
     void DrawMonthSlide(const Theme& theme, const Date& today)
     {
         const float gridHeight = 6 * kCellHeight;
-        const float offset = -scrollDir_ * gridHeight * EaseOutCubic(slideProgress_);
+        const float pos = slidePos_;
         const auto clip = D2D1::RectF(
             0, Scale(kGridTop), Scale(kLogicalWidth), Scale(kGridTop + gridHeight));
         renderTarget_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
-        DrawMonthGrid(theme, today, scrollFromYear_, scrollFromMonth_, 1.0f, offset, false);
-        DrawMonthGrid(theme, today, displayYear_, displayMonth_, 1.0f,
-                      offset + scrollDir_ * gridHeight, false);
+        const int first = static_cast<int>(std::floor(pos));
+        for (int m = first; m <= first + 1; ++m)
+        {
+            int year = 0;
+            int month = 0;
+            MonthTrackIndex(m, year, month);
+            DrawMonthGrid(theme, today, year, month, 1.0f,
+                          (m - pos) * gridHeight, false);
+        }
         renderTarget_->PopAxisAlignedClip();
     }
 
@@ -2783,8 +2817,15 @@ private:
         const auto titleRect = D2D1::RectF(Scale(22), Scale(kHeaderTop), Scale(260), Scale(62));
         if (scrollAnimating_ || slideAnimating_)
         {
-            const float progress =
-                EaseOutCubic(slideAnimating_ ? slideProgress_ : scrollProgress_);
+            float linear = scrollProgress_;
+            if (slideAnimating_)
+            {
+                // 轨道行进比例：|pos|/|target|，链式滚动时随轨道逼近目标而淡入新标题。
+                const float denominator = std::fabs(slideTarget_);
+                linear = denominator > 0.0f ? std::fabs(slidePos_) / denominator : 1.0f;
+                linear = std::clamp(linear, 0.0f, 1.0f);
+            }
+            const float progress = EaseOutCubic(linear);
             wchar_t fromTitle[64]{};
             swprintf_s(fromTitle, L"%d年%d月", scrollFromYear_, scrollFromMonth_);
             if (progress < 1.0f)
@@ -3048,9 +3089,19 @@ private:
                 }
                 else if (slideAnimating_)
                 {
-                    slideProgress_ = std::min(1.0f, slideProgress_ + 0.058f);
-                    if (slideProgress_ >= 1.0f)
+                    slidePos_ += (slideTarget_ - slidePos_) * 0.30f;
+                    // |pos| 过 1 就把基准月推进对应格数，保持索引和数值都小。
+                    const int shift = static_cast<int>(std::llround(slidePos_));
+                    if (std::abs(shift) >= 1)
                     {
+                        MonthTrackIndex(shift, scrollFromYear_, scrollFromMonth_);
+                        slidePos_ -= shift;
+                        slideTarget_ -= shift;
+                    }
+                    if (std::fabs(slideTarget_ - slidePos_) < 0.004f)
+                    {
+                        slidePos_ = 0.0f;
+                        slideTarget_ = 0.0f;
                         slideAnimating_ = false;
                         KillTimer(window_, kAnimationTimer);
                     }
@@ -3198,7 +3249,8 @@ private:
     bool scrollAnimating_{};
     float scrollProgress_{};
     bool slideAnimating_{};
-    float slideProgress_{};
+    float slidePos_{};
+    float slideTarget_{};
     int scrollDir_{1};
     int scrollFromYear_{};
     int scrollFromMonth_{};
