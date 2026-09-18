@@ -3,6 +3,11 @@
 #include <shlwapi.h>
 #include <dwmapi.h>
 #include <d2d1.h>
+#ifdef WINCAL_SETTINGS_PREVIEW
+#include <d3d11.h>
+#include <dxgi.h>
+#include <d2d1_1.h>
+#endif
 #include <dwrite.h>
 #include <imm.h>
 #include <wrl/client.h>
@@ -394,10 +399,92 @@ public:
         return ok;
     }
 
-    // Test-only: render calendar frames offscreen (hidden window, software D2D target)
-    // and verify the week-scroll animation settles exactly on the static grid.
+    // Test-only: render calendar frames with a WARP software device context into a
+    // CPU-readable bitmap, so verification never depends on window composition
+    // (works while the screen is locked or the display is asleep).
+    bool EnsurePreviewRenderTarget(int width, int height)
+    {
+        if (!factory_ && FAILED(D2D1CreateFactory(
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.ReleaseAndGetAddressOf())))
+            return false;
+        ComPtr<ID3D11Device> d3d;
+        // BGRA_SUPPORT 是 D2D 与 D3D 互操作（CreateDevice）的硬性要求。
+        HRESULT result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0, D3D11_SDK_VERSION,
+            d3d.ReleaseAndGetAddressOf(), nullptr, nullptr);
+        if (FAILED(result))
+        {
+            fwprintf_s(stderr, L"preview: D3D11CreateDevice failed hr=0x%08X\n", static_cast<unsigned>(result));
+            return false;
+        }
+        ComPtr<IDXGIDevice> dxgi;
+        if (FAILED(result = d3d.As(&dxgi)))
+        {
+            fwprintf_s(stderr, L"preview: IDXGIDevice failed hr=0x%08X\n", static_cast<unsigned>(result));
+            return false;
+        }
+        ComPtr<ID2D1Factory1> factory1;
+        if (FAILED(result = factory_.As(&factory1)))
+        {
+            fwprintf_s(stderr, L"preview: ID2D1Factory1 failed hr=0x%08X\n", static_cast<unsigned>(result));
+            return false;
+        }
+        ComPtr<ID2D1Device> device;
+        if (FAILED(result = factory1->CreateDevice(dxgi.Get(), device.ReleaseAndGetAddressOf())))
+        {
+            fwprintf_s(stderr, L"preview: CreateDevice failed hr=0x%08X\n", static_cast<unsigned>(result));
+            return false;
+        }
+        ComPtr<ID2D1DeviceContext> context;
+        if (FAILED(result = device->CreateDeviceContext(
+                D2D1_DEVICE_CONTEXT_OPTIONS_NONE, context.ReleaseAndGetAddressOf())))
+        {
+            fwprintf_s(stderr, L"preview: CreateDeviceContext failed hr=0x%08X\n", static_cast<unsigned>(result));
+            return false;
+        }
+        const float dpi = static_cast<float>(dpi_);
+        const auto pixelFormat = D2D1::PixelFormat(
+            DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+        const auto size = D2D1::SizeU(static_cast<UINT32>(width), static_cast<UINT32>(height));
+
+        // 绘制目标（TARGET）与 CPU 回读位图（CANNOT_DRAW|CPU_READ）必须分开创建：
+        // TARGET|CPU_READ 组合在本机 D2D 上会被 E_INVALIDARG 拒绝。
+        const auto targetProps = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET, pixelFormat, dpi, dpi);
+        ComPtr<ID2D1Bitmap1> targetBitmap;
+        if (FAILED(result = context->CreateBitmap(
+                size, nullptr, 0, targetProps, targetBitmap.ReleaseAndGetAddressOf())))
+        {
+            fwprintf_s(stderr, L"preview: target CreateBitmap failed hr=0x%08X\n",
+                       static_cast<unsigned>(result));
+            return false;
+        }
+        const auto stagingProps = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_CANNOT_DRAW | D2D1_BITMAP_OPTIONS_CPU_READ,
+            pixelFormat, dpi, dpi);
+        ComPtr<ID2D1Bitmap1> stagingBitmap;
+        if (FAILED(result = context->CreateBitmap(
+                size, nullptr, 0, stagingProps, stagingBitmap.ReleaseAndGetAddressOf())))
+        {
+            fwprintf_s(stderr, L"preview: staging CreateBitmap failed hr=0x%08X\n",
+                       static_cast<unsigned>(result));
+            return false;
+        }
+        context->SetDpi(dpi, dpi);
+        context->SetTarget(targetBitmap.Get());
+        previewContext_ = context;
+        previewBitmap_ = stagingBitmap;
+        previewTargetBitmap_ = targetBitmap;
+        renderTarget_ = context;
+        return true;
+    }
+
+    // Test-only: render calendar frames and verify the month-switch animation
+    // settles exactly on the static grid.
     bool RenderCalendarPreview(HINSTANCE instance, int dpi, bool dark, int dir,
-                               int fromYear, int fromMonth, float progress, const wchar_t* path)
+                               int fromYear, int fromMonth, float progress, const wchar_t* path,
+                               bool slide = false)
     {
         instance_ = instance;
         dpi_ = dpi;
@@ -416,65 +503,37 @@ public:
         const long long rows = (delta < 0 ? -delta : delta) / 7;
         scrollRows_ = static_cast<int>(std::clamp(rows, 1LL, 6LL));
 
-        if (!RegisterWindowClass()) return false;
-        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"WinCal Calendar Preview",
-            WS_POPUP, -32000, -32000, static_cast<int>(Scale(kLogicalWidth)), static_cast<int>(Scale(kLogicalHeight)),
-            nullptr, nullptr, instance, this);
-        if (!window_) return false;
-        // 屏幕外显示（PrintWindow 读不到未合成内容，但内容本身需要呈现管线）。
-        ShowWindow(window_, SW_SHOWNOACTIVATE);
-        if (!EnsureDeviceResources() || !renderTarget_)
-        {
-            DestroyWindow(window_);
-            window_ = nullptr;
+        if (!EnsurePreviewRenderTarget(Scale(kLogicalWidth), Scale(kLogicalHeight)) ||
+            !EnsureDeviceResources())
             return false;
-        }
 
         const int width = static_cast<int>(Scale(kLogicalWidth));
         const int height = static_cast<int>(Scale(kLogicalHeight));
         std::vector<BYTE> staticPixels, settledPixels, midPixels;
         const auto capture = [&](std::vector<BYTE>& pixels) {
-            // PrintWindow 读的是 DWM 最近一次合成的画面，可能滞后成全黑；
-            // 背景色（浅/深主题）都不是纯黑，全黑就再等一轮合成重试。
-            for (int attempt = 0; attempt < 20; ++attempt)
+            previewContext_->SetTarget(previewTargetBitmap_.Get());
+            Paint();
+            const HRESULT copyResult = previewBitmap_->CopyFromRenderTarget(
+                nullptr, previewContext_.Get(), nullptr);
+            if (FAILED(copyResult))
             {
-                Paint();
-                GdiFlush();
-                Sleep(60);
-                RECT client{};
-                GetClientRect(window_, &client);
-                const HDC windowDc = GetDC(window_);
-                const HDC memoryDc = CreateCompatibleDC(windowDc);
-                BITMAPINFO info{};
-                info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                info.bmiHeader.biWidth = client.right;
-                info.bmiHeader.biHeight = client.bottom;
-                info.bmiHeader.biPlanes = 1;
-                info.bmiHeader.biBitCount = 32;
-                void* bits{};
-                const HBITMAP bitmap = CreateDIBSection(memoryDc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-                bool hasContent = false;
-                if (bitmap)
-                {
-                    const auto previous = SelectObject(memoryDc, bitmap);
-                    const BOOL printed = PrintWindow(window_, memoryDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
-                    if (!printed)
-                        BitBlt(memoryDc, 0, 0, client.right, client.bottom, windowDc, 0, 0, SRCCOPY);
-                    SelectObject(memoryDc, previous);
-                    const auto first = static_cast<BYTE*>(bits);
-                    const auto last = first + static_cast<size_t>(client.right) * client.bottom * 4;
-                    for (auto i = first; i + 3 < last; i += 4)
-                        if ((i[0] | i[1] | i[2]) != 0) { hasContent = true; break; }
-                    if (hasContent)
-                        pixels.assign(first, last);
-                    DeleteObject(bitmap);
-                }
-                DeleteDC(memoryDc);
-                ReleaseDC(window_, windowDc);
-                if (hasContent)
-                    return true;
+                fwprintf_s(stderr, L"calendar preview: CopyFromRenderTarget failed hr=0x%08X\n",
+                           static_cast<unsigned>(copyResult));
+                return false;
             }
-            return false;
+            D2D1_MAPPED_RECT mapped{};
+            const HRESULT mapResult = previewBitmap_->Map(D2D1_MAP_OPTIONS_READ, &mapped);
+            if (FAILED(mapResult))
+            {
+                fwprintf_s(stderr, L"calendar preview: Map failed hr=0x%08X\n", static_cast<unsigned>(mapResult));
+                return false;
+            }
+            const size_t stride = static_cast<size_t>(width) * 4;
+            pixels.resize(stride * height);
+            for (int y = 0; y < height; ++y)
+                memcpy(pixels.data() + y * stride, mapped.bits + y * mapped.pitch, stride);
+            previewBitmap_->Unmap();
+            return true;
         };
         const auto differingPixels = [](const std::vector<BYTE>& a, const std::vector<BYTE>& b) {
             size_t count{};
@@ -489,12 +548,16 @@ public:
         };
 
         scrollAnimating_ = false;
+        slideAnimating_ = false;
         transition_ = 1.0f;
         bool ok = capture(staticPixels);
-        scrollAnimating_ = true;
-        scrollProgress_ = 1.0f;
+        if (slide)
+            slideAnimating_ = true;
+        else
+            scrollAnimating_ = true;
+        scrollProgress_ = slideProgress_ = 1.0f;
         ok = ok && capture(settledPixels);
-        scrollProgress_ = std::clamp(progress, 0.0f, 0.99f);
+        scrollProgress_ = slideProgress_ = std::clamp(progress, 0.0f, 0.99f);
         ok = ok && capture(midPixels);
         {
             const size_t total = staticPixels.size() / 4;
@@ -511,7 +574,8 @@ public:
             header.bfSize = header.bfOffBits + static_cast<DWORD>(midPixels.size());
             HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             DWORD written{};
-            BITMAPINFOHEADER bmi{sizeof(BITMAPINFOHEADER), width, height, 1, 32, 0, 0, 0, 0, 0};
+            // Map 读回的是 top-down 行序，负 biHeight 才能按原方向写出。
+            BITMAPINFOHEADER bmi{sizeof(BITMAPINFOHEADER), width, -height, 1, 32, 0, 0, 0, 0, 0};
             const bool wrote = file != INVALID_HANDLE_VALUE &&
                 WriteFile(file, &header, sizeof(header), &written, nullptr) &&
                 WriteFile(file, &bmi, sizeof(bmi), &written, nullptr) &&
@@ -519,9 +583,11 @@ public:
             if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
             ok = ok && wrote;
         }
+        renderTarget_ = nullptr;
+        previewBitmap_ = nullptr;
+        previewTargetBitmap_ = nullptr;
+        previewContext_ = nullptr;
         DiscardDeviceResources();
-        DestroyWindow(window_);
-        window_ = nullptr;
         return ok;
     }
 #endif
@@ -1341,6 +1407,7 @@ private:
         hoveredCell_ = -1;
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
         scrollAnimating_ = false;
+        slideAnimating_ = false;
         transition_ = 0.0f;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
         PositionNearTray(preferCursorMonitor);
@@ -1355,6 +1422,7 @@ private:
         SetPropW(window_, L"WinCal.LastHideReason", reinterpret_cast<HANDLE>(reason));
         KillTimer(window_, kAnimationTimer);
         scrollAnimating_ = false;
+        slideAnimating_ = false;
         KillTimer(window_, kOutsideClickTimer);
         ShowWindow(window_, SW_HIDE);
         CloseDetailWindow();
@@ -2106,7 +2174,7 @@ private:
         if (!settings_.monthPaging)
             BeginScrollTransition(delta > 0 ? 1 : -1, fromYear, fromMonth);
         else
-            BeginTransition();
+            BeginMonthSlide(delta > 0 ? 1 : -1, fromYear, fromMonth);
     }
 
     void ChangeYear(int delta)
@@ -2135,6 +2203,20 @@ private:
         scrollRows_ = static_cast<int>(std::clamp(rows, 1LL, 6LL));
         scrollProgress_ = 0.0f;
         scrollAnimating_ = true;
+        transition_ = 1.0f;
+        hoveredCell_ = -1;
+        SetTimer(window_, kAnimationTimer, 16, nullptr);
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    // 整月翻滚：当前月与相邻月整页同时渲染、在同一竖直轨道上平移。
+    void BeginMonthSlide(int dir, int fromYear, int fromMonth)
+    {
+        scrollDir_ = dir;
+        scrollFromYear_ = fromYear;
+        scrollFromMonth_ = fromMonth;
+        slideProgress_ = 0.0f;
+        slideAnimating_ = true;
         transition_ = 1.0f;
         hoveredCell_ = -1;
         SetTimer(window_, kAnimationTimer, 16, nullptr);
@@ -2513,7 +2595,8 @@ private:
         }
     }
 
-    void DrawMonthGrid(const Theme& theme, const Date& today, int year, int month, float alpha)
+    void DrawMonthGrid(const Theme& theme, const Date& today, int year, int month, float alpha,
+                       float yTranslate = 0.0f, bool enableHover = true)
     {
         for (int index = 0; index < 42; ++index)
         {
@@ -2522,7 +2605,8 @@ private:
             const auto date = DateForCell(year, month, index);
             DrawCalendarCell(
                 theme, today, date, date.month == month, column,
-                static_cast<float>(kGridTop + row * kCellHeight), index == hoveredCell_, alpha);
+                static_cast<float>(kGridTop + row * kCellHeight) + yTranslate,
+                enableHover && index == hoveredCell_, alpha);
         }
     }
 
@@ -2547,6 +2631,20 @@ private:
                                  column, top, false, 1.0f);
             }
         }
+        renderTarget_->PopAxisAlignedClip();
+    }
+
+    // 整月翻滚：新既单月网格像虚拟滚动轨道一样整体上下平移，日期按需即时生成。
+    void DrawMonthSlide(const Theme& theme, const Date& today)
+    {
+        const float gridHeight = 6 * kCellHeight;
+        const float offset = -scrollDir_ * gridHeight * EaseOutCubic(slideProgress_);
+        const auto clip = D2D1::RectF(
+            0, Scale(kGridTop), Scale(kLogicalWidth), Scale(kGridTop + gridHeight));
+        renderTarget_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        DrawMonthGrid(theme, today, scrollFromYear_, scrollFromMonth_, 1.0f, offset, false);
+        DrawMonthGrid(theme, today, displayYear_, displayMonth_, 1.0f,
+                      offset + scrollDir_ * gridHeight, false);
         renderTarget_->PopAxisAlignedClip();
     }
 
@@ -2683,9 +2781,10 @@ private:
         wchar_t title[64]{};
         swprintf_s(title, L"%d年%d月", displayYear_, displayMonth_);
         const auto titleRect = D2D1::RectF(Scale(22), Scale(kHeaderTop), Scale(260), Scale(62));
-        if (scrollAnimating_)
+        if (scrollAnimating_ || slideAnimating_)
         {
-            const float progress = EaseOutCubic(scrollProgress_);
+            const float progress =
+                EaseOutCubic(slideAnimating_ ? slideProgress_ : scrollProgress_);
             wchar_t fromTitle[64]{};
             swprintf_s(fromTitle, L"%d年%d月", scrollFromYear_, scrollFromMonth_);
             if (progress < 1.0f)
@@ -2724,6 +2823,8 @@ private:
 
         if (scrollAnimating_)
             DrawWeekRows(theme, today);
+        else if (slideAnimating_)
+            DrawMonthSlide(theme, today);
         else
             DrawMonthGrid(theme, today, displayYear_, displayMonth_, 0.45f + transition_ * 0.55f);
 
@@ -2898,8 +2999,11 @@ private:
                     displayMonth_ = selected_.month;
                     const int monthDelta =
                         (selected_.year * 12 + selected_.month) - (fromYear * 12 + fromMonth);
-                    if (!settings_.monthPaging && (monthDelta == 1 || monthDelta == -1))
+                    const bool adjacent = monthDelta == 1 || monthDelta == -1;
+                    if (adjacent && !settings_.monthPaging)
                         BeginScrollTransition(monthDelta > 0 ? 1 : -1, fromYear, fromMonth);
+                    else if (adjacent)
+                        BeginMonthSlide(monthDelta > 0 ? 1 : -1, fromYear, fromMonth);
                     else
                         BeginTransition();
                 }
@@ -2939,6 +3043,15 @@ private:
                     if (scrollProgress_ >= 1.0f)
                     {
                         scrollAnimating_ = false;
+                        KillTimer(window_, kAnimationTimer);
+                    }
+                }
+                else if (slideAnimating_)
+                {
+                    slideProgress_ = std::min(1.0f, slideProgress_ + 0.058f);
+                    if (slideProgress_ >= 1.0f)
+                    {
+                        slideAnimating_ = false;
                         KillTimer(window_, kAnimationTimer);
                     }
                 }
@@ -3084,10 +3197,17 @@ private:
     float transition_{1.0f};
     bool scrollAnimating_{};
     float scrollProgress_{};
+    bool slideAnimating_{};
+    float slideProgress_{};
     int scrollDir_{1};
     int scrollFromYear_{};
     int scrollFromMonth_{};
     int scrollRows_{};
+#ifdef WINCAL_SETTINGS_PREVIEW
+    ComPtr<ID2D1DeviceContext> previewContext_;
+    ComPtr<ID2D1Bitmap1> previewBitmap_;
+    ComPtr<ID2D1Bitmap1> previewTargetBitmap_;
+#endif
     wincal::CalendarData calendarData_;
     wincal::LunarCalendar lunarCalendar_;
     std::vector<std::jthread> calendarRefreshThreads_;
