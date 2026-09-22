@@ -53,8 +53,18 @@ constexpr UINT kCalendarRefreshTimer = 3;
 constexpr DWORD kEventObjectUncloak = 0x8018;
 constexpr UINT kMenuSettings = 1001;
 constexpr UINT kMenuExit = 1002;
+constexpr wchar_t kCalendarFontFamily[] = L"Microsoft YaHei UI";
+constexpr float kCalendarTitleFontSize = 20.0f;
+constexpr float kCalendarBodyFontSize = 12.0f;
+constexpr float kCalendarCaptionFontSize = 9.0f;
+
+float CalendarFontScale(int offset)
+{
+    return 1.0f + static_cast<float>(std::clamp(offset, -2, 10)) * 0.06f;
+}
+
 constexpr int kLogicalWidth = 430;
-constexpr int kLogicalHeight = 650;
+constexpr int kLogicalHeight = 466; // 48 DIP of breathing room below the six-week grid.
 constexpr int kSettingsLogicalWidth = 514;
 constexpr int kSettingsLogicalHeight = 592;
 constexpr int kDetailLogicalWidth = 360;
@@ -65,10 +75,10 @@ constexpr int kGridTop = 124;
 constexpr int kCellWidth = 58;
 constexpr int kCellHeight = 49;
 constexpr int kGridLeft = 12;
-constexpr int kScheduleTop = 432;
-constexpr int kScheduleBottom = 630;
-constexpr int kScheduleFirstRow = 480;
-constexpr int kScheduleRowHeight = 27;
+constexpr wchar_t kAgendaWindowClass[] = L"WinCalNativeAgenda";
+constexpr int kAgendaWidth = 320;
+constexpr int kAgendaHeader = 64;
+constexpr int kAgendaRowHeight = 64;
 constexpr int kVisibleScheduleRows = 5;
 constexpr int kSettingTheme = 2001;
 constexpr int kSettingFontOffset = 2002;
@@ -271,6 +281,169 @@ class App
 {
 public:
 #ifdef WINCAL_SETTINGS_PREVIEW
+    bool RenderDetailPreview(HINSTANCE instance, int dpi, bool dark, int offset, const wchar_t* path)
+    {
+        instance_ = instance;
+        dark_ = dark;
+        settings_.fontSizeOffset = offset;
+        if (!RegisterDetailWindowClass()) return false;
+        HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, kDetailWindowClass, L"Detail preview",
+            WS_POPUP, -30000, -30000, 360, 286, nullptr, nullptr, instance_, this);
+        if (!window) return false;
+        // Render at the requested DPI without moving a real window between monitors.
+        DeleteObject(detailTitleFont_); DeleteObject(detailBodyFont_); DeleteObject(detailCaptionFont_);
+        detailDpi_ = dpi;
+        const auto font = [&](float size, int weight)
+        {
+            return CreateFontW(-static_cast<int>(std::lround(size * CalendarFontScale(offset) * dpi / 96.0f)),
+                0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
+        };
+        detailTitleFont_ = font(kCalendarTitleFontSize, FW_SEMIBOLD);
+        detailBodyFont_ = font(kCalendarBodyFontSize, FW_NORMAL);
+        detailCaptionFont_ = font(kCalendarCaptionFontSize, FW_NORMAL);
+        detailEvent_.title = L"项目评审：下一阶段的设计方案与交付计划";
+        detailEvent_.startYear = detailEvent_.endYear = 2026;
+        detailEvent_.startMonth = detailEvent_.endMonth = 9;
+        detailEvent_.startDay = detailEvent_.endDay = 22;
+        detailEvent_.startHour = 14; detailEvent_.startMinute = 30;
+        detailEvent_.endHour = 16;
+        bool ok = DetailWhen().second == L"14:30 – 16:00";
+        detailEvent_.allDay = true;
+        detailEvent_.endDay = 24;
+        ok &= DetailWhen().first == L"2026年9月22日 – 2026年9月23日";
+        detailEvent_.allDay = false;
+        detailEvent_.endDay = 23;
+        ok &= DetailWhen().second == L"2026年9月23日  16:00 结束";
+        detailEvent_.endDay = 22;
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = DetailPx(kDetailLogicalWidth);
+        info.bmiHeader.biHeight = DetailContentHeight(dc);
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        void* pixels{};
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (!bitmap) { DeleteDC(dc); DestroyWindow(window); return false; }
+        const auto previous = SelectObject(dc, bitmap);
+        DrawDetailCard(dc, {0, 0, info.bmiHeader.biWidth, info.bmiHeader.biHeight});
+        GdiFlush();
+        BITMAPFILEHEADER header{};
+        header.bfType = 0x4d42;
+        header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
+        const DWORD bytes = info.bmiHeader.biWidth * info.bmiHeader.biHeight * 4;
+        header.bfSize = header.bfOffBits + bytes;
+        HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written{};
+        ok &= file != INVALID_HANDLE_VALUE &&
+            WriteFile(file, &header, sizeof(header), &written, nullptr) &&
+            WriteFile(file, &info.bmiHeader, sizeof(info.bmiHeader), &written, nullptr) &&
+            WriteFile(file, pixels, bytes, &written, nullptr);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        SelectObject(dc, previous);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        DestroyWindow(window);
+        fwprintf_s(stderr, L"detail preview: checks=%s\n", ok ? L"passed" : L"failed");
+        return ok;
+    }
+
+    bool RenderAgendaPreview(HINSTANCE instance, int dpi, bool dark, int offset, const wchar_t* path)
+    {
+        instance_ = instance;
+        agendaPreview_ = true;
+        agendaDpi_ = dpi;
+        dark_ = dark;
+        settings_.fontSizeOffset = offset;
+        selected_ = {2026, 9, 22};
+        displayYear_ = 2026;
+        displayMonth_ = 9;
+        if (!RegisterWindowClass() || !RegisterAgendaWindowClass()) return false;
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"Agenda test owner",
+            WS_POPUP | WS_VISIBLE, -30000, -30000, kLogicalWidth, kLogicalHeight, nullptr, nullptr, instance_, this);
+        if (!window_) return false;
+        PresentAgenda();
+        bool ok = !IsWindowVisible(agendaWindow_);
+        for (int i = 0; i < 7; ++i)
+        {
+            wincal::CalendarEvent event;
+            event.title = i == 0 ? L"中秋假期 · 与家人团聚" : i == 1
+                ? L"项目评审：讨论下一阶段的设计与交付计划" : L"团队会议与工作安排";
+            event.startYear = 2026; event.startMonth = 9; event.startDay = 22;
+            event.allDay = i == 0;
+            event.startHour = 9 + i;
+            event.startMinute = 30;
+            agendaEvents_.push_back(event);
+        }
+        PresentAgenda();
+        ok &= IsWindowVisible(agendaWindow_) != FALSE;
+        ok &= AgendaHeight() == kLogicalHeight;
+        ok &= AgendaHit(MAKELPARAM(AgendaPx(40), AgendaPx(70))) == 0;
+        ok &= AgendaHit(MAKELPARAM(AgendaPx(40), AgendaPx(20))) == -1;
+        const int month = displayMonth_;
+        SendMessageW(agendaWindow_, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+        ok &= selectedEventScroll_ == 1 && displayMonth_ == month;
+        selectedEventScroll_ = 0;
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = AgendaPx(kAgendaWidth);
+        info.bmiHeader.biHeight = AgendaPx(AgendaHeight());
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        void* pixels{};
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (!bitmap) { DeleteDC(dc); DestroyWindow(window_); return false; }
+        const auto previous = SelectObject(dc, bitmap);
+        DrawAgenda(dc, {0, 0, info.bmiHeader.biWidth, info.bmiHeader.biHeight});
+        GdiFlush();
+        BITMAPFILEHEADER header{};
+        header.bfType = 0x4d42;
+        header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
+        const DWORD bytes = info.bmiHeader.biWidth * info.bmiHeader.biHeight * 4;
+        header.bfSize = header.bfOffBits + bytes;
+        HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written{};
+        ok &= file != INVALID_HANDLE_VALUE &&
+            WriteFile(file, &header, sizeof(header), &written, nullptr) &&
+            WriteFile(file, &info.bmiHeader, sizeof(info.bmiHeader), &written, nullptr) &&
+            WriteFile(file, pixels, bytes, &written, nullptr);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        SelectObject(dc, previous);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        agendaEvents_.clear();
+        PresentAgenda();
+        ok &= !IsWindowVisible(agendaWindow_);
+        wincal::CalendarEvent single;
+        single.title = L"Single event";
+        agendaEvents_.push_back(single);
+        PresentAgenda();
+        ok &= IsWindowVisible(agendaWindow_) && AgendaRows() == 1;
+        ok &= AgendaHeight() == kLogicalHeight;
+        ok &= RegisterDetailWindowClass();
+        for (int target = 0; target < 3; ++target)
+        {
+            // Keep the test windows offscreen while exercising all focus routes.
+            CreateWindowExW(WS_EX_TOOLWINDOW, kDetailWindowClass, L"Details test",
+                WS_POPUP | WS_VISIBLE, -30000, -30000, 360, 286,
+                window_, nullptr, instance_, this);
+            ok &= IsWindowVisible(detailWindow_) != FALSE;
+            const HWND recipient = target == 0 ? window_ : target == 1 ? agendaWindow_ : detailWindow_;
+            SendMessageW(recipient, WM_KEYDOWN, VK_ESCAPE, 1);
+            ok &= !IsWindow(detailWindow_) && IsWindowVisible(window_) && IsWindowVisible(agendaWindow_);
+            SendMessageW(window_, WM_KEYDOWN, VK_ESCAPE, (static_cast<LPARAM>(1) << 30) | 1);
+            ok &= IsWindowVisible(window_) && IsWindowVisible(agendaWindow_);
+        }
+        SendMessageW(window_, WM_KEYDOWN, VK_ESCAPE, 1);
+        ok &= !IsWindowVisible(agendaWindow_) && !IsWindowVisible(window_);
+        DestroyWindow(window_);
+        window_ = nullptr;
+        fwprintf_s(stderr, L"agenda preview: checks=%s\n", ok ? L"passed" : L"failed");
+        return ok;
+    }
+
     // Test-only: real controls, no visible window, user settings or network.
     bool RenderSettingsPreview(HINSTANCE instance, int dpi, int page, bool dark, int offset, const wchar_t* path)
     {
@@ -607,7 +780,7 @@ public:
 
         taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
         if (!RegisterWindowClass() || !RegisterSettingsWindowClass() ||
-            !RegisterDetailWindowClass() || !CreateMainWindow())
+            !RegisterDetailWindowClass() || !RegisterAgendaWindowClass() || !CreateMainWindow())
             return 1;
 
         calendarData_.Load();
@@ -889,12 +1062,17 @@ private:
     {
         dark_ = settings_.themeMode == L"Dark" ||
                 (settings_.themeMode != L"Light" && IsDarkMode());
-        fontScale_ = 1.0f + static_cast<float>(std::clamp(settings_.fontSizeOffset, -2, 10)) * 0.06f;
+        fontScale_ = CalendarFontScale(settings_.fontSizeOffset);
         weekStartsMonday_ = settings_.weekStartDay != L"Sunday";
         const BOOL darkValue = dark_ ? TRUE : FALSE;
         DwmSetWindowAttribute(window_, 20, &darkValue, sizeof(darkValue));
         const DWORD roundPreference = 2;
         DwmSetWindowAttribute(window_, 33, &roundPreference, sizeof(roundPreference));
+        if (IsWindow(agendaWindow_))
+        {
+            DwmSetWindowAttribute(agendaWindow_, 20, &darkValue, sizeof(darkValue));
+            InvalidateRect(agendaWindow_, nullptr, FALSE);
+        }
     }
 
     float TextScale(float value) const
@@ -1121,6 +1299,8 @@ private:
         {
             BOOL darkValue = dark_ ? TRUE : FALSE;
             DwmSetWindowAttribute(detailWindow_, 20, &darkValue, sizeof(darkValue));
+            EnsureDetailFonts(detailWindow_);
+            PositionDetailWindow();
             InvalidateRect(detailWindow_, nullptr, FALSE);
         }
     }
@@ -1426,6 +1606,7 @@ private:
         SetTimer(window_, kAnimationTimer, 16, nullptr);
         PositionNearTray(preferCursorMonitor);
         ShowWindow(window_, SW_SHOW);
+        UpdateAgenda();
         SetForegroundWindow(window_);
         SetFocus(window_);
         InvalidateRect(window_, nullptr, FALSE);
@@ -1440,6 +1621,7 @@ private:
         slidePos_ = 0.0f;
         slideTarget_ = 0.0f;
         KillTimer(window_, kOutsideClickTimer);
+        if (IsWindow(agendaWindow_)) ShowWindow(agendaWindow_, SW_HIDE);
         ShowWindow(window_, SW_HIDE);
         CloseDetailWindow();
         hoveredCell_ = -1;
@@ -1639,6 +1821,9 @@ private:
         RECT popupRect{};
         if (GetWindowRect(window_, &popupRect) && PtInRect(&popupRect, mouse.pt))
             return;
+        RECT agendaRect{};
+        if (IsWindowVisible(agendaWindow_) && GetWindowRect(agendaWindow_, &agendaRect) &&
+            PtInRect(&agendaRect, mouse.pt)) return;
         RECT detailRect{};
         if (IsWindow(detailWindow_) && GetWindowRect(detailWindow_, &detailRect) &&
             PtInRect(&detailRect, mouse.pt))
@@ -2187,6 +2372,7 @@ private:
             --displayYear_;
         }
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
+        UpdateAgenda();
         if (!settings_.monthPaging)
             BeginScrollTransition(delta > 0 ? 1 : -1, fromYear, fromMonth);
         else
@@ -2197,6 +2383,7 @@ private:
     {
         displayYear_ += delta;
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
+        UpdateAgenda();
         BeginTransition();
     }
 
@@ -2280,26 +2467,212 @@ private:
         const float logicalY = y * 96.0f / dpi_;
         const int column = static_cast<int>((logicalX - kGridLeft) / kCellWidth);
         const int row = static_cast<int>((logicalY - kGridTop) / kCellHeight);
-        if (logicalX < kGridLeft || column < 0 || column >= 7 || row < 0 || row >= 6)
+        if (logicalY < kGridTop || logicalX < kGridLeft || column < 0 || column >= 7 || row < 0 || row >= 6)
             return -1;
         return row * 7 + column;
     }
 
-    bool IsOverSchedule(int x, int y) const
+    static LRESULT CALLBACK AgendaWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
-        const float logicalX = x * 96.0f / dpi_;
-        const float logicalY = y * 96.0f / dpi_;
-        return logicalX >= 18 && logicalX <= 412 && logicalY >= kScheduleTop && logicalY <= kScheduleBottom;
+        auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (message == WM_NCCREATE)
+        {
+            app = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+            app->agendaWindow_ = window;
+        }
+        return app ? app->HandleAgendaMessage(window, message, wParam, lParam)
+                   : DefWindowProcW(window, message, wParam, lParam);
     }
 
-    int HitTestScheduleRow(int x, int y) const
+    bool RegisterAgendaWindowClass() const
     {
-        const float logicalX = x * 96.0f / dpi_;
-        const float logicalY = y * 96.0f / dpi_;
-        if (logicalX < 24 || logicalX > 406 || logicalY < kScheduleFirstRow)
-            return -1;
-        const int row = static_cast<int>((logicalY - kScheduleFirstRow) / kScheduleRowHeight);
-        return row >= 0 && row < kVisibleScheduleRows ? row : -1;
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = AgendaWindowProc;
+        wc.hInstance = instance_;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.lpszClassName = kAgendaWindowClass;
+        return RegisterClassExW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+
+    int AgendaPx(int value) const { return MulDiv(value, agendaDpi_, 96); }
+    int AgendaRows() const { return std::min(kVisibleScheduleRows, static_cast<int>(agendaEvents_.size())); }
+    int AgendaHeight() const { return kLogicalHeight; }
+
+    void PositionAgenda()
+    {
+        if (!IsWindow(agendaWindow_)) return;
+#ifdef WINCAL_SETTINGS_PREVIEW
+        if (agendaPreview_) return;
+#endif
+        RECT anchor{};
+        if (!GetWindowRect(window_, &anchor)) return;
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+        agendaDpi_ = GetDpiForWindow(window_);
+        const int width = AgendaPx(kAgendaWidth), height = AgendaPx(AgendaHeight());
+        const int gap = AgendaPx(12);
+        LONG x = anchor.right + gap, y = anchor.top;
+        if (x + width > monitor.rcWork.right)
+            x = anchor.left - width - gap;
+        if (x < monitor.rcWork.left)
+        {
+            x = anchor.left;
+            y = anchor.bottom + gap;
+            if (y + height > monitor.rcWork.bottom) y = anchor.top - height - gap;
+        }
+        x = std::clamp(x, monitor.rcWork.left, std::max(monitor.rcWork.left, monitor.rcWork.right - width));
+        y = std::clamp(y, monitor.rcWork.top, std::max(monitor.rcWork.top, monitor.rcWork.bottom - height));
+        SetWindowPos(agendaWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    }
+
+    void UpdateAgenda()
+    {
+        agendaEvents_ = calendarData_.EventsForDate(selected_.year, selected_.month, selected_.day);
+        PresentAgenda();
+    }
+
+    void PresentAgenda()
+    {
+        if (!IsWindowVisible(window_) || agendaEvents_.empty() ||
+            selected_.year != displayYear_ || selected_.month != displayMonth_)
+        {
+            if (IsWindow(agendaWindow_)) ShowWindow(agendaWindow_, SW_HIDE);
+            CloseDetailWindow();
+            return;
+        }
+        selectedEventScroll_ = std::clamp(selectedEventScroll_, 0,
+            std::max(0, static_cast<int>(agendaEvents_.size()) - kVisibleScheduleRows));
+        if (!IsWindow(agendaWindow_))
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kAgendaWindowClass, L"日程",
+                WS_POPUP, -30000, -30000, 1, 1, window_, nullptr, instance_, this);
+        if (!IsWindow(agendaWindow_)) return;
+        const BOOL dark = dark_;
+        DwmSetWindowAttribute(agendaWindow_, 20, &dark, sizeof(dark));
+        const DWORD corner = 2;
+        DwmSetWindowAttribute(agendaWindow_, 33, &corner, sizeof(corner));
+        PositionAgenda();
+        ShowWindow(agendaWindow_, SW_SHOWNOACTIVATE);
+        InvalidateRect(agendaWindow_, nullptr, FALSE);
+    }
+
+    void DrawAgenda(HDC dc, RECT client)
+    {
+        const COLORREF background = dark_ ? RGB(28,30,38) : RGB(250,251,254);
+        const COLORREF primary = dark_ ? RGB(237,238,245) : RGB(33,38,57);
+        const COLORREF secondary = dark_ ? RGB(164,169,186) : RGB(113,121,144);
+        const COLORREF accent = dark_ ? RGB(162,155,255) : RGB(103,91,218);
+        const auto fill = [&](RECT rect, COLORREF color)
+        {
+            HBRUSH brush = CreateSolidBrush(color);
+            FillRect(dc, &rect, brush);
+            DeleteObject(brush);
+        };
+        fill(client, background);
+        const auto makeFont = [&](float size, int weight)
+        {
+            const int height = static_cast<int>(std::lround(
+                size * CalendarFontScale(settings_.fontSizeOffset) * agendaDpi_ / 96.0f));
+            return CreateFontW(-height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
+        };
+        HFONT title = makeFont(kCalendarTitleFontSize, FW_SEMIBOLD);
+        HFONT body = makeFont(kCalendarBodyFontSize, FW_NORMAL);
+        HFONT caption = makeFont(kCalendarCaptionFontSize, FW_NORMAL);
+        const auto text = [&](const std::wstring& value, int x, int y, int right, int bottom,
+                              HFONT font, COLORREF color)
+        {
+            DetailText(dc, value.c_str(), {AgendaPx(x), AgendaPx(y), AgendaPx(right), AgendaPx(bottom)},
+                font, color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        };
+        text(std::to_wstring(selected_.month) + L"月" + std::to_wstring(selected_.day) + L"日",
+            20, 12, 220, 45, title, primary);
+        text(std::to_wstring(agendaEvents_.size()) + L" 项日程", 228, 16, 302, 42, caption, secondary);
+        for (int row = 0; row < AgendaRows(); ++row)
+        {
+            const int top = kAgendaHeader + row * kAgendaRowHeight;
+            const auto& event = agendaEvents_[static_cast<size_t>(selectedEventScroll_ + row)];
+            if (row == agendaHotRow_) fill({AgendaPx(10), AgendaPx(top), AgendaPx(310), AgendaPx(top + 62)},
+                dark_ ? RGB(42,44,56) : RGB(238,237,250));
+            fill({AgendaPx(20), AgendaPx(top + 10), AgendaPx(23), AgendaPx(top + 48)}, accent);
+            text(event.title, 34, top + 4, 300, top + 36, body, primary);
+            text(EventTimeText(event, selected_), 34, top + 36, 300, top + 58, caption, secondary);
+        }
+        const auto footer = agendaEvents_.size() > kVisibleScheduleRows
+            ? std::to_wstring(selectedEventScroll_ + 1) + L"–" +
+              std::to_wstring(selectedEventScroll_ + AgendaRows()) + L" / " +
+              std::to_wstring(agendaEvents_.size()) + L" · 滚动查看更多"
+            : L"点击日程查看详情";
+        text(footer, 20, AgendaHeight() - 27, 302, AgendaHeight() - 3, caption, secondary);
+        DeleteObject(title);
+        DeleteObject(body);
+        DeleteObject(caption);
+    }
+
+    int AgendaHit(LPARAM point) const
+    {
+        const int x = MulDiv(GET_X_LPARAM(point), 96, agendaDpi_);
+        const int y = MulDiv(GET_Y_LPARAM(point), 96, agendaDpi_);
+        if (x < 10 || x >= 310 || y < kAgendaHeader) return -1;
+        const int row = (y - kAgendaHeader) / kAgendaRowHeight;
+        return row < AgendaRows() ? row : -1;
+    }
+
+    LRESULT HandleAgendaMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        switch (message)
+        {
+        case WM_PAINT:
+        {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(window, &paint);
+            RECT client{};
+            GetClientRect(window, &client);
+            DrawAgenda(dc, client);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+        case WM_MOUSEMOVE:
+        {
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+            TrackMouseEvent(&tracking);
+            const int row = AgendaHit(lParam);
+            if (row != agendaHotRow_) { agendaHotRow_ = row; InvalidateRect(window, nullptr, FALSE); }
+            SetCursor(LoadCursorW(nullptr, row >= 0 ? IDC_HAND : IDC_ARROW));
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            agendaHotRow_ = -1;
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONUP:
+            if (const int row = AgendaHit(lParam); row >= 0) ShowEventDetails(row);
+            return 0;
+        case WM_MOUSEWHEEL:
+            selectedEventScroll_ = std::clamp(selectedEventScroll_ +
+                (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1), 0,
+                std::max(0, static_cast<int>(agendaEvents_.size()) - kVisibleScheduleRows));
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) HandleEscape(lParam);
+            return 0;
+        case WM_CLOSE:
+            HidePopup(HideReason::EscapeKey);
+            return 0;
+        case WM_DPICHANGED:
+            agendaDpi_ = HIWORD(wParam);
+            PositionAgenda();
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_DESTROY:
+            agendaWindow_ = nullptr;
+            return 0;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
     }
 
     int DetailPx(int value) const
@@ -2309,17 +2682,81 @@ private:
 
     void EnsureDetailFonts(HWND window)
     {
-        if (detailTitleFont_) return;
-        detailDpi_ = GetDpiForWindow(window);
-        const auto makeFont = [&](int points, int weight)
+        const UINT dpi = GetDpiForWindow(window);
+        const int offset = settings_.fontSizeOffset;
+        if (detailTitleFont_ && detailFontOffset_ == offset && detailDpi_ == dpi) return;
+        if (detailTitleFont_) DeleteObject(detailTitleFont_);
+        if (detailBodyFont_) DeleteObject(detailBodyFont_);
+        if (detailCaptionFont_) DeleteObject(detailCaptionFont_);
+        detailDpi_ = dpi;
+        detailFontOffset_ = offset;
+        const auto makeFont = [&](float size, int weight)
         {
-            return CreateFontW(-MulDiv(points, detailDpi_, 72), 0, 0, 0, weight,
-                FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+            return CreateFontW(-static_cast<int>(std::lround(size * CalendarFontScale(offset) * dpi / 96.0f)),
+                0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
         };
-        detailTitleFont_ = makeFont(16, FW_SEMIBOLD);
-        detailBodyFont_ = makeFont(11, FW_NORMAL);
-        detailCaptionFont_ = makeFont(9, FW_NORMAL);
+        detailTitleFont_ = makeFont(kCalendarTitleFontSize, FW_SEMIBOLD);
+        detailBodyFont_ = makeFont(kCalendarBodyFontSize, FW_NORMAL);
+        detailCaptionFont_ = makeFont(kCalendarCaptionFontSize, FW_NORMAL);
+    }
+
+    std::pair<std::wstring, std::wstring> DetailWhen() const
+    {
+        const auto date = [](int y, int m, int d)
+        {
+            return std::to_wstring(y) + L"年" + std::to_wstring(m) + L"月" + std::to_wstring(d) + L"日";
+        };
+        const auto time = [](int h, int m)
+        {
+            wchar_t value[16]{};
+            swprintf_s(value, L"%02d:%02d", h, m);
+            return std::wstring(value);
+        };
+        const auto& e = detailEvent_;
+        const auto startDate = date(e.startYear, e.startMonth, e.startDay);
+        const auto start = DaysFromCivil(e.startYear, e.startMonth, e.startDay);
+        const auto end = e.endYear ? DaysFromCivil(e.endYear, e.endMonth, e.endDay) : start;
+        if (e.allDay)
+        {
+            const auto last = CivilFromDays(std::max(start, end - 1));
+            return {end > start + 1 ? startDate + L" – " + date(last.year, last.month, last.day) : startDate, L"全天"};
+        }
+        if (end > start)
+            return {startDate + L"  " + time(e.startHour, e.startMinute) + L" 开始",
+                date(e.endYear, e.endMonth, e.endDay) + L"  " + time(e.endHour, e.endMinute) + L" 结束"};
+        const bool hasEnd = e.endYear &&
+            std::pair{e.endHour, e.endMinute} > std::pair{e.startHour, e.startMinute};
+        return {startDate, time(e.startHour, e.startMinute) +
+            (hasEnd ? L" – " + time(e.endHour, e.endMinute) : L"")};
+    }
+
+    int MeasureDetailText(HDC dc, const std::wstring& text, HFONT font) const
+    {
+        RECT rect{0, 0, DetailPx(kDetailLogicalWidth - 48), 0};
+        const auto previous = SelectObject(dc, font);
+        ::DrawTextW(dc, text.c_str(), -1, &rect, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+        SelectObject(dc, previous);
+        return rect.bottom;
+    }
+
+    int DetailContentHeight(HDC dc) const
+    {
+        const auto [date, time] = DetailWhen();
+        return DetailPx(56 + 20 + 8 + 24) + MeasureDetailText(dc, detailEvent_.title, detailTitleFont_) +
+            MeasureDetailText(dc, date, detailBodyFont_) + MeasureDetailText(dc, time, detailBodyFont_);
+    }
+
+    RECT DetailCloseRect() const
+    {
+        return {DetailPx(kDetailLogicalWidth - 44), DetailPx(12),
+            DetailPx(kDetailLogicalWidth - 12), DetailPx(44)};
+    }
+
+    bool DetailCloseHit(LPARAM point) const
+    {
+        const auto rect = DetailCloseRect();
+        return PtInRect(&rect, {GET_X_LPARAM(point), GET_Y_LPARAM(point)}) != FALSE;
     }
 
     void DetailText(HDC dc, const wchar_t* text, RECT rect, HFONT font,
@@ -2332,72 +2769,62 @@ private:
         SelectObject(dc, oldFont);
     }
 
+    void DrawDetailCard(HDC dc, RECT client)
+    {
+        const COLORREF background = dark_ ? RGB(28,30,38) : RGB(250,251,254);
+        const COLORREF primary = dark_ ? RGB(237,238,245) : RGB(33,38,57);
+        const COLORREF secondary = dark_ ? RGB(164,169,186) : RGB(113,121,144);
+        const COLORREF accent = dark_ ? RGB(162,155,255) : RGB(103,91,218);
+        HBRUSH brush = CreateSolidBrush(background);
+        FillRect(dc, &client, brush);
+        DeleteObject(brush);
+        const auto close = DetailCloseRect();
+        if (detailCloseHot_)
+        {
+            brush = CreateSolidBrush(dark_ ? RGB(42,44,56) : RGB(238,237,250));
+            const auto oldBrush = SelectObject(dc, brush);
+            const auto oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, close.left, close.top, close.right, close.bottom, DetailPx(8), DetailPx(8));
+            SelectObject(dc, oldPen);
+            SelectObject(dc, oldBrush);
+            DeleteObject(brush);
+        }
+        const auto pen = CreatePen(PS_SOLID, std::max(1, DetailPx(1)), secondary);
+        const auto oldPen = SelectObject(dc, pen);
+        const int x = (close.left + close.right) / 2, y = (close.top + close.bottom) / 2;
+        MoveToEx(dc, x - DetailPx(4), y - DetailPx(4), nullptr);
+        LineTo(dc, x + DetailPx(4), y + DetailPx(4));
+        MoveToEx(dc, x + DetailPx(4), y - DetailPx(4), nullptr);
+        LineTo(dc, x - DetailPx(4), y + DetailPx(4));
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+        detailScroll_ = std::clamp(detailScroll_, 0, std::max(0, DetailContentHeight(dc) - static_cast<int>(client.bottom)));
+        const int saved = SaveDC(dc);
+        IntersectClipRect(dc, DetailPx(24), DetailPx(52), client.right - DetailPx(24), client.bottom - DetailPx(20));
+        int top = DetailPx(56) - detailScroll_;
+        const auto draw = [&](const std::wstring& value, HFONT font, COLORREF color)
+        {
+            const int height = MeasureDetailText(dc, value, font);
+            DetailText(dc, value.c_str(), {DetailPx(24), top, client.right - DetailPx(24), top + height},
+                font, color, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL);
+            top += height;
+        };
+        draw(detailEvent_.title, detailTitleFont_, primary);
+        top += DetailPx(20);
+        const auto [date, time] = DetailWhen();
+        draw(date, detailBodyFont_, secondary);
+        top += DetailPx(8);
+        draw(time, detailBodyFont_, accent);
+        RestoreDC(dc, saved);
+    }
+
     void PaintDetailWindow(HWND window)
     {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(window, &paint);
-        const bool isDark = dark_;
-        const COLORREF background = isDark ? RGB(24, 25, 31) : RGB(246, 247, 251);
-        const COLORREF card = isDark ? RGB(33, 35, 43) : RGB(255, 255, 255);
-        const COLORREF primary = isDark ? RGB(237, 238, 245) : RGB(33, 38, 57);
-        const COLORREF secondary = isDark ? RGB(164, 169, 186) : RGB(113, 121, 144);
-        const COLORREF border = isDark ? RGB(57, 60, 75) : RGB(229, 232, 242);
-        const COLORREF accent = isDark ? RGB(162, 155, 255) : RGB(103, 91, 218);
         RECT client{};
         GetClientRect(window, &client);
-        const auto backgroundBrush = CreateSolidBrush(background);
-        FillRect(dc, &client, backgroundBrush);
-        DeleteObject(backgroundBrush);
-        RECT panel{DetailPx(1), DetailPx(1), client.right - DetailPx(1), client.bottom - DetailPx(1)};
-        const auto panelBrush = CreateSolidBrush(card);
-        const auto panelPen = CreatePen(PS_SOLID, DetailPx(1), border);
-        const auto oldBrush = SelectObject(dc, panelBrush);
-        const auto oldPen = SelectObject(dc, panelPen);
-        RoundRect(dc, panel.left, panel.top, panel.right, panel.bottom, DetailPx(14), DetailPx(14));
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, oldPen);
-        DeleteObject(panelBrush);
-        DeleteObject(panelPen);
-
-        RECT closeRect{DetailPx(312), DetailPx(14), DetailPx(344), DetailPx(46)};
-        if (detailCloseHot_)
-        {
-            const auto hoverBrush = CreateSolidBrush(isDark ? RGB(66, 61, 82) : RGB(242, 240, 253));
-            FillRect(dc, &closeRect, hoverBrush);
-            DeleteObject(hoverBrush);
-        }
-        DetailText(dc, L"×", closeRect, detailBodyFont_, secondary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        RECT titleRect{DetailPx(24), DetailPx(22), DetailPx(294), DetailPx(76)};
-        DetailText(dc, detailEvent_.title.c_str(), titleRect, detailTitleFont_, primary,
-                   DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
-
-        wchar_t dateText[48]{};
-        swprintf_s(dateText, L"%d年%d月%d日", detailDate_.year, detailDate_.month, detailDate_.day);
-        DetailText(dc, dateText, {DetailPx(24), DetailPx(92), DetailPx(310), DetailPx(118)},
-                   detailBodyFont_, accent);
-
-        std::wstring timeText;
-        if (detailEvent_.allDay)
-            timeText = L"全天日程";
-        else
-            timeText = L"开始：" + EventTimeText(detailEvent_, detailDate_);
-        if (detailEvent_.endYear || detailEvent_.endMonth || detailEvent_.endDay)
-        {
-            timeText += L"  · 结束：" + std::to_wstring(detailEvent_.endMonth) +
-                        L"月" + std::to_wstring(detailEvent_.endDay) + L"日";
-        }
-        DetailText(dc, timeText.c_str(), {DetailPx(24), DetailPx(126), DetailPx(332), DetailPx(154)},
-                   detailCaptionFont_, secondary);
-
-        const auto separator = CreateSolidBrush(border);
-        RECT line{DetailPx(24), DetailPx(174), client.right - DetailPx(24), DetailPx(175)};
-        FillRect(dc, &line, separator);
-        DeleteObject(separator);
-        DetailText(dc, L"日程详情", {DetailPx(24), DetailPx(192), DetailPx(300), DetailPx(218)},
-                   detailCaptionFont_, secondary);
-        DetailText(dc, L"点击右上角 × 或按 Esc 关闭", {DetailPx(24), DetailPx(236), DetailPx(320), DetailPx(260)},
-                   detailCaptionFont_, secondary);
+        DrawDetailCard(dc, client);
         EndPaint(window, &paint);
     }
 
@@ -2405,12 +2832,16 @@ private:
     {
         if (!IsWindow(detailWindow_)) return;
         RECT mainRect{};
-        GetWindowRect(window_, &mainRect);
+        GetWindowRect(IsWindowVisible(agendaWindow_) ? agendaWindow_ : window_, &mainRect);
         HMONITOR monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
         MONITORINFO monitorInfo{sizeof(monitorInfo)};
         GetMonitorInfoW(monitor, &monitorInfo);
         const int width = DetailPx(kDetailLogicalWidth);
-        const int height = DetailPx(kDetailLogicalHeight);
+        EnsureDetailFonts(detailWindow_);
+        HDC dc = GetDC(detailWindow_);
+        const int height = std::min(DetailContentHeight(dc),
+            std::max(DetailPx(120), static_cast<int>(monitorInfo.rcWork.bottom - monitorInfo.rcWork.top) - DetailPx(24)));
+        ReleaseDC(detailWindow_, dc);
         const int gap = DetailPx(12);
         LONG x = mainRect.right + gap;
         if (x + width > monitorInfo.rcWork.right)
@@ -2418,6 +2849,16 @@ private:
         x = std::clamp(x, monitorInfo.rcWork.left, std::max(monitorInfo.rcWork.left, monitorInfo.rcWork.right - width));
         LONG y = std::clamp(mainRect.top, monitorInfo.rcWork.top, std::max(monitorInfo.rcWork.top, monitorInfo.rcWork.bottom - height));
         SetWindowPos(detailWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    }
+
+    void HandleEscape(LPARAM keyState)
+    {
+        // Do not let key auto-repeat dismiss the parent after closing details.
+        if (keyState & (static_cast<LPARAM>(1) << 30)) return;
+        if (IsWindowVisible(detailWindow_))
+            CloseDetailWindow();
+        else
+            HidePopup(HideReason::EscapeKey);
     }
 
     void CloseDetailWindow()
@@ -2434,6 +2875,8 @@ private:
         {
             detailDpi_ = GetDpiForWindow(window);
             EnsureDetailFonts(window);
+            const DWORD corner = 2;
+            DwmSetWindowAttribute(window, 33, &corner, sizeof(corner));
             BOOL darkValue = dark_ ? TRUE : FALSE;
             DwmSetWindowAttribute(window, 20, &darkValue, sizeof(darkValue));
             return 0;
@@ -2447,10 +2890,8 @@ private:
         {
             TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0};
             TrackMouseEvent(&track);
-            const bool hot = GET_X_LPARAM(lParam) >= DetailPx(304) &&
-                             GET_X_LPARAM(lParam) <= DetailPx(352) &&
-                             GET_Y_LPARAM(lParam) >= DetailPx(8) &&
-                             GET_Y_LPARAM(lParam) <= DetailPx(52);
+            const bool hot = DetailCloseHit(lParam);
+            SetCursor(LoadCursorW(nullptr, hot ? IDC_HAND : IDC_ARROW));
             if (hot != detailCloseHot_)
             {
                 detailCloseHot_ = hot;
@@ -2463,16 +2904,20 @@ private:
             InvalidateRect(window, nullptr, FALSE);
             return 0;
         case WM_LBUTTONUP:
-            if (GET_X_LPARAM(lParam) >= DetailPx(304) &&
-                GET_X_LPARAM(lParam) <= DetailPx(352) &&
-                GET_Y_LPARAM(lParam) >= DetailPx(8) &&
-                GET_Y_LPARAM(lParam) <= DetailPx(52))
+            if (DetailCloseHit(lParam))
                 CloseDetailWindow();
+            return 0;
+        case WM_MOUSEWHEEL:
+            detailScroll_ = std::max(0, detailScroll_ + (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -DetailPx(36) : DetailPx(36)));
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_CLOSE:
+            CloseDetailWindow();
             return 0;
         case WM_KEYDOWN:
             if (wParam == VK_ESCAPE)
             {
-                CloseDetailWindow();
+                HandleEscape(lParam);
                 return 0;
             }
             break;
@@ -2506,10 +2951,11 @@ private:
 
     void ShowEventDetails(int row)
     {
-        const auto events = calendarData_.EventsForDate(selected_.year, selected_.month, selected_.day);
+        const auto& events = agendaEvents_;
         const int index = selectedEventScroll_ + row;
         if (index < 0 || index >= static_cast<int>(events.size()))
             return;
+        detailScroll_ = 0;
         detailEvent_ = events[static_cast<size_t>(index)];
         detailDate_ = selected_;
         if (!IsWindow(detailWindow_))
@@ -2746,24 +3192,24 @@ private:
         if (!titleFormat_)
         {
             HRESULT result = writeFactory_->CreateTextFormat(
-                L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(20), L"zh-CN",
+                kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(kCalendarTitleFontSize), L"zh-CN",
                 titleFormat_.ReleaseAndGetAddressOf());
             if (SUCCEEDED(result)) result = writeFactory_->CreateTextFormat(
-                L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(12), L"zh-CN",
+                kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(kCalendarBodyFontSize), L"zh-CN",
                 bodyFormat_.ReleaseAndGetAddressOf());
             if (SUCCEEDED(result)) result = writeFactory_->CreateTextFormat(
-                L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(13), L"zh-CN",
                 dayFormat_.ReleaseAndGetAddressOf());
             if (SUCCEEDED(result)) result = writeFactory_->CreateTextFormat(
-                L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(9), L"zh-CN",
+                kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(kCalendarCaptionFontSize), L"zh-CN",
                 lunarFormat_.ReleaseAndGetAddressOf());
             if (SUCCEEDED(result)) result = writeFactory_->CreateTextFormat(
-                L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(9), L"zh-CN",
+                kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(kCalendarCaptionFontSize), L"zh-CN",
                 badgeFormat_.ReleaseAndGetAddressOf());
             if (FAILED(result))
             {
@@ -2875,66 +3321,6 @@ private:
         else
             DrawMonthGrid(theme, today, displayYear_, displayMonth_, 0.45f + transition_ * 0.55f);
 
-        const float cardTop = Scale(kScheduleTop);
-        const auto cardBrush = Brush(theme.card);
-        renderTarget_->FillRoundedRectangle(
-            D2D1::RoundedRect(
-                D2D1::RectF(Scale(18), cardTop, Scale(412), Scale(kScheduleBottom)), Scale(12), Scale(12)),
-            cardBrush.Get());
-        bodyFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        wchar_t scheduleTitle[64]{};
-        swprintf_s(scheduleTitle, L"%d月%d日 · 日程", selected_.month, selected_.day);
-        DrawText(
-            scheduleTitle, bodyFormat_.Get(),
-            D2D1::RectF(Scale(34), Scale(kScheduleTop + 12), Scale(250), Scale(kScheduleTop + 40)),
-            theme.primary);
-        const auto selectedEvents = calendarData_.EventsForDate(selected_.year, selected_.month, selected_.day);
-        if (selectedEvents.empty())
-        {
-            const auto systemState = calendarData_.SystemState();
-            const wchar_t* status = L"当天暂无日程";
-            if (systemState == wincal::SystemCalendarState::Loading)
-                status = L"系统日历加载中";
-            else if (systemState == wincal::SystemCalendarState::Unavailable)
-                status = L"系统日历不可用 · 当天暂无日程";
-            DrawText(
-                status, bodyFormat_.Get(),
-                D2D1::RectF(Scale(34), Scale(kScheduleFirstRow), Scale(390), Scale(kScheduleFirstRow + 40)),
-                theme.secondary);
-        }
-        else
-        {
-            const int lastScroll = std::max(0, static_cast<int>(selectedEvents.size()) - kVisibleScheduleRows);
-            selectedEventScroll_ = std::clamp(selectedEventScroll_, 0, lastScroll);
-            for (int row = 0; row < kVisibleScheduleRows; ++row)
-            {
-                const int index = selectedEventScroll_ + row;
-                if (index >= static_cast<int>(selectedEvents.size()))
-                    break;
-                const float top = Scale(static_cast<float>(kScheduleFirstRow + row * kScheduleRowHeight));
-                const auto& event = selectedEvents[static_cast<size_t>(index)];
-                const auto line = EventTimeText(event, selected_) + L"  " + event.title;
-                DrawText(
-                    line.c_str(), bodyFormat_.Get(),
-                    D2D1::RectF(Scale(34), top, Scale(394), top + Scale(kScheduleRowHeight - 2)),
-                    theme.secondary);
-            }
-            if (selectedEvents.size() > kVisibleScheduleRows)
-            {
-                wchar_t indicator[32]{};
-                swprintf_s(indicator, L"%d-%d / %zu", selectedEventScroll_ + 1,
-                    std::min(selectedEventScroll_ + kVisibleScheduleRows, static_cast<int>(selectedEvents.size())),
-                    selectedEvents.size());
-                bodyFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-                DrawText(
-                    indicator, bodyFormat_.Get(),
-                    D2D1::RectF(Scale(300), Scale(kScheduleTop + 12), Scale(394), Scale(kScheduleTop + 40)),
-                    theme.muted);
-                bodyFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            }
-        }
-        bodyFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-
         const HRESULT result = renderTarget_->EndDraw();
 #ifdef WINCAL_SETTINGS_PREVIEW
         if (FAILED(result))
@@ -2976,6 +3362,9 @@ private:
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_MOVE:
+            PositionAgenda();
+            return 0;
         case WM_SIZE:
             if (renderTarget_)
                 static_cast<ID2D1HwndRenderTarget*>(renderTarget_.Get())
@@ -3004,6 +3393,7 @@ private:
             ApplyDwmAppearance();
             DiscardDeviceResources();
             calendarData_.Load();
+            UpdateAgenda();
             StartCalendarRefresh();
             UpdateCalendarDiagnostics();
             RequestSystemCalendarMonth(displayYear_, displayMonth_);
@@ -3027,11 +3417,6 @@ private:
             return 0;
         case WM_LBUTTONUP:
         {
-            if (const int scheduleRow = HitTestScheduleRow(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)); scheduleRow >= 0)
-            {
-                ShowEventDetails(scheduleRow);
-                return 0;
-            }
             const int hit = HitTestCell(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             if (hit >= 0)
             {
@@ -3054,23 +3439,15 @@ private:
                     else
                         BeginTransition();
                 }
+                RequestSystemCalendarMonth(displayYear_, displayMonth_);
+                UpdateAgenda();
                 InvalidateRect(window_, nullptr, FALSE);
             }
             return 0;
         }
         case WM_MOUSEWHEEL:
         {
-            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            ScreenToClient(window_, &point);
-            if (IsOverSchedule(point.x, point.y))
-            {
-                selectedEventScroll_ += GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1;
-                InvalidateRect(window_, nullptr, FALSE);
-            }
-            else
-            {
-                ChangeMonth(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
-            }
+            ChangeMonth(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
             return 0;
         }
         case WM_KEYDOWN:
@@ -3078,7 +3455,7 @@ private:
             else if (wParam == VK_RIGHT) ChangeMonth(1);
             else if (wParam == VK_UP) ChangeYear(-1);
             else if (wParam == VK_DOWN) ChangeYear(1);
-            else if (wParam == VK_ESCAPE) HidePopup(HideReason::EscapeKey);
+            else if (wParam == VK_ESCAPE) HandleEscape(lParam);
             else return DefWindowProcW(window_, message, wParam, lParam);
             return 0;
         case WM_TIMER:
@@ -3172,12 +3549,14 @@ private:
             return 0;
         case kCalendarDataUpdatedMessage:
             UpdateCalendarDiagnostics();
+            UpdateAgenda();
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         case kShowSettingsMessage:
             ShowSettingsWindow();
             return 0;
         case WM_DESTROY:
+            if (IsWindow(agendaWindow_)) DestroyWindow(agendaWindow_);
             CloseDetailWindow();
             for (auto& thread : calendarRefreshThreads_)
                 if (thread.joinable()) thread.request_stop();
@@ -3206,7 +3585,16 @@ private:
     HINSTANCE instance_{};
     HWND window_{};
     HWND settingsWindow_{};
+#ifdef WINCAL_SETTINGS_PREVIEW
+    bool agendaPreview_{};
+#endif
+    HWND agendaWindow_{};
+    UINT agendaDpi_{96};
+    int agendaHotRow_{-1};
+    std::vector<wincal::CalendarEvent> agendaEvents_;
     HWND detailWindow_{};
+    int detailScroll_{};
+    int detailFontOffset_{};
     HFONT detailTitleFont_{};
     HFONT detailBodyFont_{};
     HFONT detailCaptionFont_{};
