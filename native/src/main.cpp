@@ -574,6 +574,67 @@ public:
         return ok;
     }
 
+    bool CheckContinuousScrolling(HINSTANCE instance)
+    {
+        instance_ = instance;
+        if (!RegisterWindowClass()) return false;
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"Scroll test",
+            WS_POPUP, -30000, -30000, 430, 466, nullptr, nullptr, instance_, this);
+        if (!window_) return false;
+        settings_.monthPaging = false;
+        displayYear_ = 2026;
+        displayMonth_ = 12;
+        dpi_ = 96;
+        bool ok = true;
+        const auto settle = [&]
+        {
+            for (int i = 0; i < 100 && continuousAnimating_; ++i) AdvanceContinuousScroll();
+            return !continuousAnimating_;
+        };
+        for (bool monday : {false, true})
+        {
+            weekStartsMonday_ = monday;
+            displayYear_ = 2026;
+            displayMonth_ = 12;
+            ResetContinuousScroll();
+            const auto initialAnchor = continuousAnchor_;
+            ScrollContinuously(-60);
+            ok &= settle() && std::abs(continuousPosition_ - 0.375) < 0.0001;
+            const int x = kGridLeft + kCellWidth / 2;
+            const int y = kGridTop + kCellHeight - 1;
+            const int hit = HitTestCell(x, y);
+            ok &= hit == 7 && ContinuousDateForCell(hit) == CivilFromDays(initialAnchor + 7);
+            dpi_ = 144;
+            ok &= HitTestCell(MulDiv(x, 144, 96), MulDiv(y, 144, 96)) == 7;
+            dpi_ = 96;
+            ok &= HitTestCell(x, kGridTop - 1) == -1;
+            ok &= HitTestCell(x, kGridTop + 6 * kCellHeight) == -1;
+            ScrollContinuously(-60);
+            ScrollContinuously(-120);
+            ok &= settle() && continuousAnchor_ == initialAnchor + 7 &&
+                std::abs(continuousPosition_ - 0.5) < 0.0001;
+            ScrollContinuously(240);
+            ok &= settle() && continuousAnchor_ == initialAnchor && continuousPosition_ == 0.0;
+            ScrollContinuously(60);
+            ok &= settle() && continuousAnchor_ == initialAnchor - 7 &&
+                std::abs(continuousPosition_ - 0.625) < 0.0001;
+            ScrollContinuously(-60);
+            ok &= settle() && continuousAnchor_ == initialAnchor && continuousPosition_ == 0.0;
+            ScrollContinuously(-960);
+            ok &= settle() && displayYear_ == 2027 && displayMonth_ == 1;
+            const auto position = continuousPosition_;
+            const auto anchor = continuousAnchor_;
+            HandleMessage(WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+            ok &= continuousPosition_ == position && continuousAnchor_ == anchor;
+            ResetContinuousScroll();
+            ok &= continuousPosition_ == 0.0 && continuousTarget_ == 0.0;
+        }
+        DestroyWindow(window_);
+        window_ = nullptr;
+        fwprintf_s(stderr, L"continuous scroll: checks=%s\n", ok ? L"passed" : L"failed");
+        return ok;
+    }
+
     // Test-only: render calendar frames with a WARP software device context into a
     // CPU-readable bitmap, so verification never depends on window composition
     // (works while the screen is locked or the display is asleep).
@@ -618,7 +679,8 @@ public:
             fwprintf_s(stderr, L"preview: CreateDeviceContext failed hr=0x%08X\n", static_cast<unsigned>(result));
             return false;
         }
-        const float dpi = static_cast<float>(dpi_);
+        // Drawing coordinates already include Scale(); match the HWND target.
+        constexpr float dpi = 96.0f;
         const auto pixelFormat = D2D1::PixelFormat(
             DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
         const auto size = D2D1::SizeU(static_cast<UINT32>(width), static_cast<UINT32>(height));
@@ -659,7 +721,7 @@ public:
     // settles exactly on the static grid.
     bool RenderCalendarPreview(HINSTANCE instance, int dpi, bool dark, int dir,
                                int fromYear, int fromMonth, float progress, const wchar_t* path,
-                               bool slide = false)
+                               bool slide = false, bool continuous = false)
     {
         instance_ = instance;
         dpi_ = dpi;
@@ -678,7 +740,7 @@ public:
         const long long rows = (delta < 0 ? -delta : delta) / 7;
         scrollRows_ = static_cast<int>(std::clamp(rows, 1LL, 6LL));
 
-        if (!EnsurePreviewRenderTarget(Scale(kLogicalWidth), Scale(kLogicalHeight)) ||
+        if (!EnsurePreviewRenderTarget(static_cast<int>(Scale(kLogicalWidth)), static_cast<int>(Scale(kLogicalHeight))) ||
             !EnsureDeviceResources())
             return false;
 
@@ -735,10 +797,21 @@ public:
             scrollAnimating_ = true;
         scrollProgress_ = 1.0f;
         slidePos_ = slideTarget_ = static_cast<float>(trackDir);
+        if (continuous)
+        {
+            settings_.monthPaging = false;
+            ResetContinuousScroll();
+            scrollAnimating_ = false;
+        }
         ok = ok && capture(settledPixels);
         slideTarget_ = static_cast<float>(trackDir);
         slidePos_ = trackDir * std::clamp(progress, 0.0f, 0.99f);
         scrollProgress_ = std::clamp(progress, 0.0f, 0.99f);
+        if (continuous)
+        {
+            scrollAnimating_ = false;
+            continuousPosition_ = continuousTarget_ = 0.375;
+        }
         ok = ok && capture(midPixels);
         {
             const size_t total = staticPixels.size() / 4;
@@ -1050,11 +1123,11 @@ private:
         settings_ = wincal::SettingsStore::Load();
         if (settings_.autoStartup)
             ApplyAutoStartup(true);
-        ApplyDwmAppearance();
         const auto today = Today();
         displayYear_ = today.year;
         displayMonth_ = today.month;
         selected_ = today;
+        ApplyDwmAppearance();
         return true;
     }
 
@@ -1063,7 +1136,15 @@ private:
         dark_ = settings_.themeMode == L"Dark" ||
                 (settings_.themeMode != L"Light" && IsDarkMode());
         fontScale_ = CalendarFontScale(settings_.fontSizeOffset);
+        const bool previousWeekStart = weekStartsMonday_;
         weekStartsMonday_ = settings_.weekStartDay != L"Sunday";
+        if (settings_.monthPaging)
+        {
+            continuousInitialized_ = false;
+            continuousAnimating_ = false;
+        }
+        else if (!continuousInitialized_ || previousWeekStart != weekStartsMonday_)
+            ResetContinuousScroll();
         const BOOL darkValue = dark_ ? TRUE : FALSE;
         DwmSetWindowAttribute(window_, 20, &darkValue, sizeof(darkValue));
         const DWORD roundPreference = 2;
@@ -1595,6 +1676,7 @@ private:
         displayYear_ = today.year;
         displayMonth_ = today.month;
         selected_ = today;
+        ResetContinuousScroll();
         selectedEventScroll_ = 0;
         hoveredCell_ = -1;
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
@@ -1616,6 +1698,7 @@ private:
     {
         SetPropW(window_, L"WinCal.LastHideReason", reinterpret_cast<HANDLE>(reason));
         KillTimer(window_, kAnimationTimer);
+        continuousAnimating_ = false;
         scrollAnimating_ = false;
         slideAnimating_ = false;
         slidePos_ = 0.0f;
@@ -2359,11 +2442,66 @@ private:
         return DefWindowProcW(window, message, wParam, lParam);
     }
 
+    void ResetContinuousScroll()
+    {
+        continuousAnchor_ = WeekRowStartDays(displayYear_, displayMonth_);
+        continuousPosition_ = continuousTarget_ = 0.0;
+        continuousAnimating_ = false;
+        continuousInitialized_ = !settings_.monthPaging;
+    }
+
+    void ScrollContinuously(int wheelDelta)
+    {
+        if (!continuousInitialized_) ResetContinuousScroll();
+        // Preserve high-resolution wheel deltas and fractional rows at rest.
+        continuousTarget_ -= static_cast<double>(wheelDelta) / WHEEL_DELTA * 0.75;
+        continuousAnimating_ = true;
+        scrollAnimating_ = slideAnimating_ = false;
+        transition_ = 1.0f;
+        hoveredCell_ = -1;
+        SetTimer(window_, kAnimationTimer, 16, nullptr);
+    }
+
+    Date ContinuousDateForCell(int index) const
+    {
+        const auto firstRow = static_cast<long long>(std::floor(continuousPosition_));
+        return CivilFromDays(continuousAnchor_ + (firstRow + index / 7) * 7 + index % 7);
+    }
+
+    void AdvanceContinuousScroll()
+    {
+        continuousPosition_ += (continuousTarget_ - continuousPosition_) * 0.30;
+        if (std::abs(continuousTarget_ - continuousPosition_) < 0.001)
+        {
+            continuousPosition_ = continuousTarget_;
+            continuousAnimating_ = false;
+            KillTimer(window_, kAnimationTimer);
+        }
+        // Keep offsets small while preserving the fractional position and target.
+        const auto wholeRows = static_cast<long long>(std::floor(continuousPosition_));
+        continuousAnchor_ += wholeRows * 7;
+        continuousPosition_ -= wholeRows;
+        continuousTarget_ -= wholeRows;
+        const auto middle = CivilFromDays(continuousAnchor_ + 17);
+        if (middle.year != displayYear_ || middle.month != displayMonth_)
+        {
+            displayYear_ = middle.year;
+            displayMonth_ = middle.month;
+            RequestSystemCalendarMonth(displayYear_, displayMonth_);
+            UpdateAgenda();
+        }
+        PresentAgenda();
+        hoveredCell_ = -1;
+    }
+
     void ChangeMonth(int delta)
     {
         const int fromYear = displayYear_;
         const int fromMonth = displayMonth_;
-        int value = displayYear_ * 12 + displayMonth_ - 1 + delta;
+        const auto destination = !settings_.monthPaging && continuousInitialized_ && continuousAnimating_
+            ? CivilFromDays(continuousAnchor_ + static_cast<long long>(std::floor(continuousTarget_)) * 7 + 17)
+            : Date{displayYear_, displayMonth_, 1};
+        int value = destination.year * 12 + destination.month - 1 + delta;
         displayYear_ = value / 12;
         displayMonth_ = value % 12 + 1;
         if (displayMonth_ <= 0)
@@ -2374,7 +2512,13 @@ private:
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
         UpdateAgenda();
         if (!settings_.monthPaging)
-            BeginScrollTransition(delta > 0 ? 1 : -1, fromYear, fromMonth);
+        {
+            if (!continuousInitialized_) ResetContinuousScroll();
+            continuousTarget_ = static_cast<double>(WeekRowStartDays(displayYear_, displayMonth_) - continuousAnchor_) / 7.0;
+            continuousAnimating_ = true;
+            scrollAnimating_ = slideAnimating_ = false;
+            SetTimer(window_, kAnimationTimer, 16, nullptr);
+        }
         else
             BeginMonthSlide(delta > 0 ? 1 : -1, fromYear, fromMonth);
     }
@@ -2382,6 +2526,7 @@ private:
     void ChangeYear(int delta)
     {
         displayYear_ += delta;
+        ResetContinuousScroll();
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
         UpdateAgenda();
         BeginTransition();
@@ -2466,8 +2611,11 @@ private:
         const float logicalX = x * 96.0f / dpi_;
         const float logicalY = y * 96.0f / dpi_;
         const int column = static_cast<int>((logicalX - kGridLeft) / kCellWidth);
-        const int row = static_cast<int>((logicalY - kGridTop) / kCellHeight);
-        if (logicalY < kGridTop || logicalX < kGridLeft || column < 0 || column >= 7 || row < 0 || row >= 6)
+        const bool continuous = !settings_.monthPaging && continuousInitialized_;
+        const double fraction = continuous ? continuousPosition_ - std::floor(continuousPosition_) : 0.0;
+        const int row = static_cast<int>(std::floor((logicalY - kGridTop) / kCellHeight + fraction));
+        if (logicalY < kGridTop || logicalY >= kGridTop + 6 * kCellHeight ||
+            logicalX < kGridLeft || column < 0 || column >= 7 || row < 0)
             return -1;
         return row * 7 + column;
     }
@@ -2534,8 +2682,13 @@ private:
 
     void PresentAgenda()
     {
-        if (!IsWindowVisible(window_) || agendaEvents_.empty() ||
-            selected_.year != displayYear_ || selected_.month != displayMonth_)
+        const auto selectedDay = DaysFromCivil(selected_.year, selected_.month, selected_.day);
+        const auto firstVisibleDay = continuousAnchor_ + static_cast<long long>(std::floor(continuousPosition_)) * 7;
+        const bool outsideContinuousView = !settings_.monthPaging && continuousInitialized_ &&
+            (selectedDay < firstVisibleDay || selectedDay >= firstVisibleDay +
+                (continuousPosition_ == std::floor(continuousPosition_) ? 42 : 49));
+        if (outsideContinuousView || !IsWindowVisible(window_) || agendaEvents_.empty() ||
+            (settings_.monthPaging && (selected_.year != displayYear_ || selected_.month != displayMonth_)))
         {
             if (IsWindow(agendaWindow_)) ShowWindow(agendaWindow_, SW_HIDE);
             CloseDetailWindow();
@@ -3090,11 +3243,13 @@ private:
         }
     }
 
-    // 逐周平滑滚动：把网格渲染成以源月份首行为锚点的连续周行列表。
+    // 连续周列表保留小数行偏移；旧翻月预览仍可使用动画位置。
     void DrawWeekRows(const Theme& theme, const Date& today)
     {
-        const float position = scrollDir_ * scrollRows_ * EaseOutCubic(scrollProgress_);
-        const long long anchor = WeekRowStartDays(scrollFromYear_, scrollFromMonth_);
+        const bool continuous = !settings_.monthPaging && continuousInitialized_;
+        const float position = continuous ? static_cast<float>(continuousPosition_) :
+            scrollDir_ * scrollRows_ * EaseOutCubic(scrollProgress_);
+        const long long anchor = continuous ? continuousAnchor_ : WeekRowStartDays(scrollFromYear_, scrollFromMonth_);
         const int firstRow = static_cast<int>(std::floor(position));
         const float gridBottom = static_cast<float>(kGridTop + 6 * kCellHeight);
         const auto clip = D2D1::RectF(0, Scale(kGridTop), Scale(kLogicalWidth), Scale(gridBottom));
@@ -3108,7 +3263,7 @@ private:
             {
                 const Date date = CivilFromDays(anchor + row * 7 + column);
                 DrawCalendarCell(theme, today, date, date.month == displayMonth_,
-                                 column, top, false, 1.0f);
+                                 column, top, continuous && (row - firstRow) * 7 + column == hoveredCell_, 1.0f);
             }
         }
         renderTarget_->PopAxisAlignedClip();
@@ -3314,7 +3469,7 @@ private:
                 (weekStartsMonday_ ? column >= 5 : column == 0 || column == 6) ? theme.accent : theme.secondary);
         }
 
-        if (scrollAnimating_)
+        if ((!settings_.monthPaging && continuousInitialized_) || scrollAnimating_)
             DrawWeekRows(theme, today);
         else if (slideAnimating_)
             DrawMonthSlide(theme, today);
@@ -3421,9 +3576,10 @@ private:
             if (hit >= 0)
             {
                 CloseDetailWindow();
-                selected_ = DateForCell(displayYear_, displayMonth_, hit);
+                const bool continuous = !settings_.monthPaging && continuousInitialized_;
+                selected_ = continuous ? ContinuousDateForCell(hit) : DateForCell(displayYear_, displayMonth_, hit);
                 selectedEventScroll_ = 0;
-                if (selected_.year != displayYear_ || selected_.month != displayMonth_)
+                if (!continuous && (selected_.year != displayYear_ || selected_.month != displayMonth_))
                 {
                     const int fromYear = displayYear_;
                     const int fromMonth = displayMonth_;
@@ -3447,7 +3603,10 @@ private:
         }
         case WM_MOUSEWHEEL:
         {
-            ChangeMonth(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
+            if (!settings_.monthPaging)
+                ScrollContinuously(GET_WHEEL_DELTA_WPARAM(wParam));
+            else
+                ChangeMonth(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
             return 0;
         }
         case WM_KEYDOWN:
@@ -3466,7 +3625,11 @@ private:
             }
             if (wParam == kAnimationTimer)
             {
-                if (scrollAnimating_)
+                if (continuousAnimating_)
+                {
+                    AdvanceContinuousScroll();
+                }
+                else if (scrollAnimating_)
                 {
                     scrollProgress_ = std::min(1.0f, scrollProgress_ + 0.058f);
                     if (scrollProgress_ >= 1.0f)
@@ -3645,6 +3808,11 @@ private:
     int hoveredCell_{-1};
     int selectedEventScroll_{};
     float transition_{1.0f};
+    bool continuousInitialized_{};
+    bool continuousAnimating_{};
+    long long continuousAnchor_{};
+    double continuousPosition_{};
+    double continuousTarget_{};
     bool scrollAnimating_{};
     float scrollProgress_{};
     bool slideAnimating_{};

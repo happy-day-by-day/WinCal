@@ -5,6 +5,12 @@ int wmain(int argc, wchar_t** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     App app;
+    if (argc == 2 && wcscmp(argv[1], L"--check-continuous") == 0)
+        return app.CheckContinuousScrolling(GetModuleHandleW(nullptr)) ? 0 : 1;
+    if (argc == 9 && wcscmp(argv[1], L"--continuous") == 0)
+        return app.RenderCalendarPreview(GetModuleHandleW(nullptr), _wtoi(argv[2]),
+            _wtoi(argv[3]) != 0, _wtoi(argv[4]), _wtoi(argv[5]), _wtoi(argv[6]),
+            static_cast<float>(_wtof(argv[7])), argv[8], false, true) ? 0 : 1;
     if (argc == 6 && wcscmp(argv[1], L"--detail") == 0)
         return app.RenderDetailPreview(GetModuleHandleW(nullptr), _wtoi(argv[2]),
             _wtoi(argv[3]) != 0, _wtoi(argv[4]), argv[5]) ? 0 : 1;

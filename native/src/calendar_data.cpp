@@ -1582,10 +1582,10 @@ bool CalendarData::RefreshSystemCalendar(int year, int month, std::stop_token st
         {
             FindAppointmentsOptions options;
             options.MaxCount(1000);
-            const auto rangeStart = LocalMonthStart(year, month) - std::chrono::hours(24 * 7);
+            const auto rangeStart = LocalMonthStart(year, month) - std::chrono::hours(24 * 31);
             const auto rangeLength = std::chrono::duration_cast<
                 winrt::Windows::Foundation::TimeSpan>(
-                    std::chrono::hours(24 * (DaysInMonth(year, month) + 14)));
+                    std::chrono::hours(24 * (DaysInMonth(year, month) + 62)));
             const auto appointments = store.FindAppointmentsAsync(
                 rangeStart, rangeLength, options).get();
 

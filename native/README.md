@@ -13,7 +13,7 @@ WinCal 的主工程是原生 Win32/C++ 版本。旧版 WPF 工程已冻结并归
 - Direct2D/DirectWrite 日历绘制
 - Direct2D 软件渲染目标：本机实测弹窗私有内存约 16–19 MB；硬件优先目标约 53 MB，因此不作为默认路径
 - 单击日期、悬停反馈和轻量淡入动画
-- 方向键切换月份/年份，鼠标滚轮切换月份；「整月翻滚」开启时新既单月整页上下滑动（相邻月按需即时渲染），关闭时逐周平滑滚动（年切换仍为淡入）
+- 方向键切换月份/年份，鼠标滚轮切换月份；「整月翻滚」开启时新既单月整页上下滑动（相邻月按需即时渲染），关闭时按滚轮位移连续滚动，不吸附月份或周行（年切换仍为淡入）
 - 每次打开恢复当前月份
 - 读取现有设置并从磁盘 ICS 缓存即时展示事件点及“休/班”角标
 - 使用 Windows 中国农历在日期格显示农历日期与常见传统节日，不引入额外常驻组件
@@ -102,4 +102,11 @@ cmake --build native/build --config Release --target WinCalSettingsPreview
 
 ```powershell
 .\native\build\Release\WinCalSettingsPreview.exe --detail 144 1 10 native/out/detail-dark.bmp
+```
+
+连续滚动关闭整月翻滚后生效：滚轮位移可累积并随时反向，小幅滚轮输入保留小数行位移；月份标题跟随可见区域中部日期更新，点击日期不会跳回月首。重新打开日历时仍回到本月。离屏验证：
+
+```powershell
+.\native\build\Release\WinCalSettingsPreview.exe --check-continuous
+.\native\build\Release\WinCalSettingsPreview.exe --continuous 96 0 1 2026 9 0.5 native/out/continuous.bmp
 ```
