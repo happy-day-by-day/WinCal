@@ -85,3 +85,12 @@ target_compile_definitions(WinCalSettingsPreview PRIVATE UNICODE _UNICODE WIN32_
 target_compile_options(WinCalSettingsPreview PRIVATE /utf-8 /W4 /permissive- /EHsc)
 target_link_options(WinCalSettingsPreview PRIVATE /MANIFEST:NO)
 target_link_libraries(WinCalSettingsPreview PRIVATE $<TARGET_PROPERTY:WinCalNative,LINK_LIBRARIES> d3d11 dxgi)
+
+# Parser and refresh regression tests do not access user settings or services.
+add_executable(WinCalCalendarTests tests/calendar_data_tests.cpp)
+target_compile_features(WinCalCalendarTests PRIVATE cxx_std_20)
+target_compile_definitions(WinCalCalendarTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(WinCalCalendarTests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+target_link_libraries(WinCalCalendarTests PRIVATE bcrypt ole32 shell32 winhttp windowsapp)
+enable_testing()
+add_test(NAME CalendarRegression COMMAND WinCalCalendarTests)

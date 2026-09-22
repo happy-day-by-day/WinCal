@@ -1,4 +1,5 @@
 #include "calendar_data.h"
+#include "refresh_policy.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -803,6 +804,9 @@ bool ParseIcsDate(
         event.endYear = date.wYear;
         event.endMonth = date.wMonth;
         event.endDay = date.wDay;
+        event.endHour = date.wHour;
+        event.endMinute = date.wMinute;
+        event.endSecond = date.wSecond;
     }
     return true;
 }
@@ -1132,7 +1136,20 @@ std::wstring DecodeIcsText(std::string_view value)
 std::vector<CalendarEvent> ParseIcs(std::string_view content)
 {
     const EmbeddedTimeZones embeddedTimeZones = ParseEmbeddedTimeZones(content);
-    std::vector<CalendarEvent> events;
+    struct Component
+    {
+        CalendarEvent event;
+        std::string uid;
+        std::string rule;
+        std::set<long long> excluded, additional;
+        std::optional<CalendarEvent> recurrenceId;
+        bool cancelled{};
+        bool hasStart{};
+    };
+    std::vector<Component> components;
+    std::string uid;
+    std::optional<CalendarEvent> recurrenceId;
+    bool cancelled{};
     CalendarEvent current;
     bool insideEvent{};
     bool hasStart{};
@@ -1148,13 +1165,16 @@ std::vector<CalendarEvent> ParseIcs(std::string_view content)
             insideEvent = true;
             hasStart = false;
             recurrenceRule.clear();
+            uid.clear();
+            recurrenceId.reset();
+            cancelled = false;
             excludedDays.clear();
             additionalDays.clear();
             continue;
         }
         if (line == "END:VEVENT")
         {
-            if (insideEvent && hasStart)
+            if (insideEvent && (hasStart || recurrenceId))
             {
                 if (!current.endYear)
                 {
@@ -1163,12 +1183,8 @@ std::vector<CalendarEvent> ParseIcs(std::string_view content)
                     current.endDay = current.startDay;
                 }
                 if (current.title.empty()) current.title = L"(无标题)";
-                auto expanded = ExpandRecurringEvent(
-                    current, recurrenceRule, excludedDays, additionalDays);
-                events.insert(
-                    events.end(),
-                    std::make_move_iterator(expanded.begin()),
-                    std::make_move_iterator(expanded.end()));
+                components.push_back({current, uid, recurrenceRule, excludedDays,
+                    additionalDays, recurrenceId, cancelled, hasStart});
             }
             insideEvent = false;
             continue;
@@ -1193,6 +1209,13 @@ std::vector<CalendarEvent> ParseIcs(std::string_view content)
             ParseIcsDate(value, property, embeddedTimeZones, current, false);
         else if (name == "SUMMARY")
             current.title = DecodeIcsText(value);
+        else if (name == "UID") uid.assign(value);
+        else if (name == "STATUS") cancelled = value == "CANCELLED";
+        else if (name == "RECURRENCE-ID")
+        {
+            CalendarEvent id;
+            if (ParseIcsDate(value, property, embeddedTimeZones, id, true)) recurrenceId = id;
+        }
         else if (name == "RRULE")
             recurrenceRule.assign(value);
         else if (name == "EXDATE" || name == "RDATE")
@@ -1207,6 +1230,33 @@ std::vector<CalendarEvent> ParseIcs(std::string_view content)
                     (name == "EXDATE" ? excludedDays : additionalDays).insert(date);
                 }
             }
+        }
+    }
+    std::vector<CalendarEvent> events;
+    const auto identity = [](const CalendarEvent& event)
+    {
+        return std::tuple{event.startYear, event.startMonth, event.startDay,
+            event.startHour, event.startMinute};
+    };
+    std::map<std::string, std::set<decltype(identity(CalendarEvent{}))>> overrides;
+    for (const auto& component : components)
+        if (!component.uid.empty() && component.recurrenceId)
+            overrides[component.uid].insert(identity(*component.recurrenceId));
+    for (const auto& component : components)
+    {
+        if (component.cancelled || !component.hasStart) continue;
+        if (component.recurrenceId)
+        {
+            events.push_back(component.event);
+            continue;
+        }
+        auto expanded = ExpandRecurringEvent(component.event, component.rule,
+            component.excluded, component.additional);
+        for (auto& event : expanded)
+        {
+            const auto found = overrides.find(component.uid);
+            const bool overridden = found != overrides.end() && found->second.contains(identity(event));
+            if (!overridden) events.push_back(std::move(event));
         }
     }
     return events;
@@ -1229,6 +1279,7 @@ bool OccursOn(const CalendarEvent& event, int year, int month, int day)
         event.startYear, static_cast<unsigned>(event.startMonth), static_cast<unsigned>(event.startDay));
     long long end = DayNumber(
         event.endYear, static_cast<unsigned>(event.endMonth), static_cast<unsigned>(event.endDay));
+    if (!event.allDay && (event.endHour || event.endMinute || event.endSecond)) ++end;
     if (end <= start) end = start + 1;
     return selected >= start && selected < end;
 }
@@ -1335,6 +1386,9 @@ CalendarEvent FromSystemAppointment(
     event.endYear = endParts.tm_year + 1900;
     event.endMonth = endParts.tm_mon + 1;
     event.endDay = endParts.tm_mday;
+    event.endHour = endParts.tm_hour;
+    event.endMinute = endParts.tm_min;
+    event.endSecond = endParts.tm_sec;
     event.allDay = appointment.AllDay();
     return event;
 }
@@ -1476,8 +1530,8 @@ bool CalendarData::RefreshFromNetwork(std::stop_token stopToken)
         const auto modified = std::filesystem::last_write_time(subscription.cachePath, error);
         if (!error)
         {
-            const auto age = decltype(modified)::clock::now() - modified;
-            if (age >= decltype(age)::zero() && age < std::chrono::minutes(refreshMinutes))
+            if (wincal::CacheIsFresh(modified, decltype(modified)::clock::now(),
+                    std::chrono::minutes(refreshMinutes)))
                 continue;
         }
 
@@ -1507,7 +1561,8 @@ bool CalendarData::RefreshSystemCalendar(int year, int month, std::stop_token st
         const std::lock_guard lock(mutex_);
         if (!usesSystemCalendar_)
             return false;
-        if (systemEventsByMonth_.contains(key))
+        if (systemEventsByMonth_.contains(key) &&
+            CacheIsFresh(systemLoadedAt_, std::chrono::steady_clock::now(), std::chrono::minutes(1)))
             return false;
         systemState_ = SystemCalendarState::Loading;
     }
@@ -1555,8 +1610,13 @@ bool CalendarData::RefreshSystemCalendar(int year, int month, std::stop_token st
         return false;
 
     const std::lock_guard lock(mutex_);
+    if (!usesSystemCalendar_) return false;
     if (available)
     {
+        // Monthly queries overlap. Retire older snapshots so deleted or moved
+        // appointments cannot survive through a neighbouring month cache.
+        systemEventsByMonth_.clear();
+        systemLoadedAt_ = std::chrono::steady_clock::now();
         systemEventsByMonth_[key] = std::move(loadedEvents);
         systemState_ = SystemCalendarState::Available;
         RebuildEventsLocked();

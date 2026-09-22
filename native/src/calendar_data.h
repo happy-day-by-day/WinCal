@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -35,6 +36,9 @@ struct CalendarEvent
     int endYear{};
     int endMonth{};
     int endDay{};
+    int endHour{};
+    int endMinute{};
+    int endSecond{};
     bool allDay{};
 };
 
@@ -70,6 +74,7 @@ private:
     std::vector<CalendarEvent> icsEvents_;
     std::vector<CalendarEvent> systemEvents_;
     std::map<std::pair<int, int>, std::vector<CalendarEvent>> systemEventsByMonth_;
+    std::chrono::steady_clock::time_point systemLoadedAt_{};
     std::vector<Subscription> subscriptions_;
     bool usesIcs_{};
     bool usesSystemCalendar_{};

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "calendar_data.h"
+#include "refresh_policy.h"
 #include "app_settings.h"
 #include "lunar_calendar.h"
 #include "../resources/resource.h"
@@ -48,6 +49,7 @@ constexpr UINT kShowSettingsMessage = WM_APP + 6;
 constexpr UINT kTaskbarClockClickMessage = WM_APP + 7;
 constexpr UINT kAnimationTimer = 1;
 constexpr UINT kOutsideClickTimer = 2;
+constexpr UINT kCalendarRefreshTimer = 3;
 constexpr DWORD kEventObjectUncloak = 0x8018;
 constexpr UINT kMenuSettings = 1001;
 constexpr UINT kMenuExit = 1002;
@@ -614,6 +616,7 @@ public:
         StartSystemCalendarInterceptor();
         StartGlobalMouseMonitor();
         StartCalendarRefresh();
+        SetTimer(window_, kCalendarRefreshTimer, 60000, nullptr);
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
         if (openSettings)
             PostMessageW(window_, kShowSettingsMessage, 0, 0);
@@ -687,21 +690,24 @@ private:
         }
         calendarRefreshThreads_.emplace_back([this](std::stop_token stopToken)
         {
-            try
+            wincal::RunRefreshLoop(stopToken, std::chrono::minutes(1), [&]
             {
-                const auto notifyUpdated = [this, &stopToken]()
+                try
                 {
-                    if (!stopToken.stop_requested() && IsWindow(window_))
-                        PostMessageW(window_, kCalendarDataUpdatedMessage, 0, 0);
-                };
+                    const auto notifyUpdated = [this, &stopToken]()
+                    {
+                        if (!stopToken.stop_requested() && IsWindow(window_))
+                            PostMessageW(window_, kCalendarDataUpdatedMessage, 0, 0);
+                    };
 
-                if (calendarData_.RefreshFromNetwork(stopToken))
-                    notifyUpdated();
-            }
-            catch (...)
-            {
-                // 后台刷新失败不影响已加载的本地缓存和主消息循环。
-            }
+                    if (calendarData_.RefreshFromNetwork(stopToken))
+                        notifyUpdated();
+                }
+                catch (...)
+                {
+                    // 后台刷新失败不影响已加载的本地缓存和主消息循环。
+                }
+            });
         });
     }
 
@@ -3076,6 +3082,11 @@ private:
             else return DefWindowProcW(window_, message, wParam, lParam);
             return 0;
         case WM_TIMER:
+            if (wParam == kCalendarRefreshTimer)
+            {
+                RequestSystemCalendarMonth(displayYear_, displayMonth_);
+                return 0;
+            }
             if (wParam == kAnimationTimer)
             {
                 if (scrollAnimating_)

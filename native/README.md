@@ -75,3 +75,13 @@ cmake --build native/build --config Release --target WinCalNativeSmoke
 ```
 
 验证中国农历不为空，并确认当前用户的设置及 ICS 别名能够读取。
+
+## 日历数据回归测试
+
+```powershell
+cmake --build native/build --config Release --target WinCalCalendarTests
+ctest --test-dir native/build -C Release --output-on-failure
+```
+
+测试不访问用户配置或日历服务，覆盖跨午夜事件、结束时间边界、重复日程改期和取消、缓存到期、后台重复刷新及停止等待。
+ICS 后台每分钟检查缓存是否达到配置的刷新间隔；系统日历快照有效期为一分钟，并定期重新读取当前显示月份。刷新失败保留上次成功的数据。
